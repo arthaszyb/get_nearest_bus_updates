@@ -1,7 +1,6 @@
 # iOS 快捷指令搭建步骤
 
-前提:已按 README 部署好 Cloudflare Worker,并拿到网址,例如
-`https://still-hall-b0f1.arthas-zyb.workers.dev`。
+前提:已按 README 部署好 Cloudflare Worker,并拿到网址
 
 ## 步骤
 
