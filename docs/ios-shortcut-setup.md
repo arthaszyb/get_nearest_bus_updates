@@ -1,38 +1,44 @@
-# iOS 快捷指令搭建步骤
+# iOS Shortcut setup
 
-前提:已按 README 部署好 Cloudflare Worker,并拿到网址
+Assumes you've already deployed the Cloudflare Worker per the main [README](../README.md) and
+have its URL, e.g. `https://your-worker.your-subdomain.workers.dev`.
 
-## 步骤
+## Steps
 
-1. 打开"快捷指令" App → 右上角 **+** 新建
-2. 搜索添加动作 **"获取当前位置"**(Get Current Location)
-3. 搜索添加动作 **"URL"**,内容填:
+1. Open the **Shortcuts** app → tap **+** to create a new Shortcut
+2. Add action: **Get Current Location**
+3. Add action: **URL**, set its content to:
 
    ```
-   https://你的worker地址/?lat=
+   https://your-worker-url/?lat=
    ```
 
-   光标停在末尾,点键盘上方变量插入图标,选"获取当前位置"的结果插入;
-   插入后再点一下这个变量,弹出属性列表,选 **"纬度"**。
-   接着继续手打 `&lon=`,再插入一次"获取当前位置"的结果,这次选 **"经度"**。
-   最后手打 `&token=你设置的暗号`。
+   With the cursor at the end, tap the variable-insert icon above the keyboard and insert the
+   result of "Get Current Location". Tap that inserted variable again — a property list pops up —
+   choose **Latitude**.
+   Then type `&lon=` and insert "Get Current Location" again, this time choosing **Longitude**.
+   Finally type `&token=your-access-token`.
 
-4. 搜索添加动作 **"获取URL的内容"**(Get Contents of URL),自动接上一步的 URL
-5. 搜索添加动作 **"显示结果"**(Show Result)或 **"快速查看"**(Quick Look),
-   内容选上一步"获取URL的内容"的结果
+4. Add action: **Get Contents of URL** — it automatically picks up the URL from the previous step
+5. Add action: **Show Result** (or **Quick Look**), with content set to the result of "Get
+   Contents of URL"
 
-   > 不要用"显示通知"(Show Notification)—— iOS 系统通知横幅只显示前两行,
-   > 内容较长时会被截断,"显示结果"/"快速查看"才能完整展示。
+   > Don't use **Show Notification** — iOS notification banners only display the first couple of
+   > lines and truncate anything longer. **Show Result** / **Quick Look** display the full text.
 
-6. 点右上角播放键测试,应直接弹出附近站点的到站时间,没有列表选择或确认框
+6. Tap the ▶️ play button to test. It should immediately show arrival times for the nearest stops
+   — no stop-picking list, no confirmation dialog.
 
-## 常见问题
+## Troubleshooting
 
-- **报错 "No valid file provider found" / 需要面容ID**:说明这个 Shortcut 用到了本地文件
-  (Files/iCloud云盘)缓存,而 Files App 设了锁。本项目的 Worker 方案完全不依赖本地文件,
-  不会有这个问题;如果你还在用其他第三方 Shortcut 才会遇到。
-- **只显示2行/内容不全**:用的是"显示通知",按上面步骤5换成"显示结果"或"快速查看"。
+- **"No valid file provider found" / prompted for Face ID**: this means whichever Shortcut you're
+  running depends on a local file cache (Files app / iCloud Drive), and Files access is locked.
+  This project's Worker approach doesn't touch local files at all, so it won't hit this — if
+  you're seeing it, you're likely running a different, file-caching Shortcut instead.
+- **Only 2 lines shown / content cut off**: you're using "Show Notification". Switch to "Show
+  Result" or "Quick Look" per step 5 above.
 
-## 加到桌面 / 锁屏
+## Add to Home Screen / Lock Screen
 
-搭好之后建议把这个 Shortcut 加到桌面小组件或锁屏,实现真正的一键直达。
+Once it's working, add the Shortcut as a Home Screen or Lock Screen widget for a true one-tap
+experience.

@@ -1,62 +1,136 @@
-# get_nearest_bus_updates
+# SG Bus Nearest 🚌
 
-一键查询附近公交站到站时间的 iOS 快捷指令后端。
+One-tap nearest-bus-stop arrival times for Singapore, wired up as a 4-step iOS Shortcut.
 
-## 为什么需要这个
+No stop-picking menus. No confirmation dialogs. No local file dependencies.
+Tap the Shortcut → it locates you → it tells you what's coming and when.
 
-新加坡 LTA DataMall 的官方接口只支持"按已知站牌编号查询",不支持"按经纬度查附近站点"。
-这个项目补上这一块:后端一次性拉取全岛约5000+个站点坐标,计算离你当前位置最近的几个站,
-再查询这些站的实时到站时间,返回一段可以直接显示的纯文本。
+## Why this exists
 
-配合 iOS 快捷指令(Shortcuts),可以做到真正的"一键直达":定位 → 查询 → 显示结果,
-没有列表选择,没有确认弹窗。
+Singapore's official [LTA DataMall](https://datamall.lta.gov.sg) API is great for looking up
+arrival times at a bus stop you already know the code for — but it has **no "find stops near
+this coordinate" endpoint**. `BusStops` only supports paging through the full ~5,000+ stop list;
+`BusArrival` only accepts a known `BusStopCode`. There is no radius/lat-lng filter anywhere in
+the current API surface.
 
-## 架构
+So "what bus is coming, near me, right now" — the one query everyone actually wants — has to be
+built on top, client-side or server-side. This repo does it server-side, so the phone-side
+Shortcut can stay dead simple.
+
+## How it works
+
+```mermaid
+flowchart LR
+    A[iOS Shortcut Get Current Location] --> B[Cloudflare Worker]
+    B --> C[LTA BusStops API - fetch all stops, cached in KV]
+    B --> D[Find nearest N stops - haversine distance]
+    D --> E[LTA BusArrival API per nearest stop]
+    E --> F[Plain-text response]
+    F --> G[Shortcut: Show Result]
+```
+
+1. The Shortcut grabs your current GPS location — that's it, that's the entire client-side logic.
+2. The Worker fetches (or reads from cache) the full LTA bus stop list, computes distance from
+   your location to every stop, and keeps the nearest few (covers both directions of a road by
+   default).
+3. It queries live arrival times for those stops and returns one clean plain-text block.
+4. The Shortcut displays it. No parsing, no menus, no taps beyond the initial one.
+
+## Features
+
+- **Zero-selection UX** — no "which stop did you mean" prompts
+- **No local storage / Files dependency** — nothing breaks if iCloud Drive or Face ID locks get
+  in the way (this was the actual motivation for building this — other Shortcuts out there that
+  rely on cached local files can repeatedly hit permission prompts)
+- **KV-backed caching** — the ~5,000-stop list is cached for 7 days (coordinates rarely change),
+  so most requests skip the expensive full re-fetch
+- **Shared-secret access token** — the endpoint isn't wide open to anyone who finds the URL
+- **Single file, no build step** — deploy straight from the Cloudflare dashboard, no `npm install`
+  required (though a `wrangler.toml` is included if you prefer the CLI)
+
+## Deploy
+
+You'll need a free [LTA DataMall](https://datamall.lta.gov.sg/content/datamall/en/request-for-api.html)
+API key (an Account Key, emailed to you after registering) and a free
+[Cloudflare](https://dash.cloudflare.com) account.
+
+### Option A — Dashboard (no CLI, ~5 minutes)
+
+1. Cloudflare dashboard → **Workers & Pages** → **Create application** → **Start with Hello
+   World!** → Deploy
+2. Click **Edit code**, select all, replace with the contents of
+   [`worker/bus-nearest-worker.js`](./worker/bus-nearest-worker.js), then **Deploy**
+3. Worker → **Settings → Variables and Secrets** → add:
+   - `LTA_API_KEY` (Secret) — your LTA Account Key
+   - `ACCESS_TOKEN` (Secret) — any string you make up; this gates the endpoint
+4. (Recommended) Enable caching — see [Caching](#caching) below
+5. Copy your Worker URL, e.g. `https://your-worker.your-subdomain.workers.dev`
+
+### Option B — Wrangler CLI
+
+```bash
+npm install -g wrangler
+wrangler login
+wrangler secret put LTA_API_KEY
+wrangler secret put ACCESS_TOKEN
+wrangler deploy
+```
+
+Edit `wrangler.toml` first if you already have a Worker deployed via the dashboard and want to
+manage it from the CLI instead — set `name` to match your existing Worker's name so this updates
+it in place rather than creating a duplicate.
+
+### Caching
+
+Bus stop coordinates barely ever change, so re-fetching all ~5,000 of them on every single
+request is wasteful. Enable KV caching:
+
+1. Dashboard → **Workers & Pages → KV** → **Create a namespace** (e.g. `bus-stops-cache`)
+2. Your Worker → **Settings → Bindings → Add binding → KV Namespace** — variable name
+   `BUS_STOPS_KV`, bind it to the namespace you just created
+3. Redeploy
+
+Cached data expires automatically after 7 days. To force a refresh sooner, call the endpoint with
+`&refresh=1`.
+
+This binding is optional — the Worker falls back to a live fetch every request if it's absent, so
+nothing breaks if you skip this step.
+
+## API
 
 ```
-当前位置 (Shortcut 获取)
-    │
-    ▼
-Cloudflare Worker (本仓库 worker/bus-nearest-worker.js)
-    │  1. 并行拉取 LTA BusStops 全部分页
-    │  2. 计算每个站点到当前位置的距离,取最近 N 个
-    │  3. 查询这些站点的 LTA BusArrival(到站时间)
-    │  4. 拼成纯文本返回
-    ▼
-iOS 快捷指令 "显示结果" / "快速查看"
+GET /?lat={latitude}&lon={longitude}&token={your ACCESS_TOKEN}
 ```
 
-## 部署
+Optional: `&refresh=1` to bypass the stop-list cache for this request.
 
-1. 注册 [LTA DataMall](https://datamall.lta.gov.sg) 账号,申请 API Account Key(免费,邮件发放)
-2. 注册 [Cloudflare](https://dash.cloudflare.com) 免费账号
-3. Workers & Pages → Create application → Start with Hello World! → 部署
-4. 部署后点 Edit code,把 [`worker/bus-nearest-worker.js`](./worker/bus-nearest-worker.js) 的内容整个粘贴进去,覆盖默认代码,点 Deploy
-5. 该 Worker 的 Settings → Variables and Secrets → 新增变量 `LTA_API_KEY`(类型选 Secret),值填第1步申请到的 Key
-6. 再新增一个变量 `ACCESS_TOKEN`(类型选 Secret),值随便设一串你自己记得住的暗号(例如一串随机字符),
-   用来防止别人拿到网址后白嫖调用你的接口
-7. (可选,推荐)设置本地缓存,避免每次请求都重新拉取全量约5000个站点坐标:
-   - Workers & Pages 左侧菜单 → **KV** → Create a namespace,起个名字比如 `bus-stops-cache`
-   - 回到你的 Worker → Settings → Bindings → Add binding → 选 **KV Namespace**,
-     Variable name 填 `BUS_STOPS_KV`,选刚才创建的命名空间,保存
-   - 站点坐标数据基本不变,缓存 7 天自动过期刷新;如果想手动强制刷新,访问时加 `&refresh=1` 参数即可跳过缓存
-8. 复制 Worker 网址,形如 `https://xxx.yyy.workers.dev`
+Returns `text/plain`, nearest stops first, one arrival line per bus service. Example:
 
-测试:浏览器访问 `https://xxx.yyy.workers.dev/?lat=1.3492&lon=103.7565&token=你设的暗号`(换成你自己的坐标和暗号),
-应返回附近几个站点的到站时间文本。没有 `token` 参数或暗号不对会返回 401。
+```
+【Blk 272 43161】(135m)
+173: 10min, 27min
 
-## iOS 快捷指令搭建
+【Blk 254 43169】(166m)
+No arrival info
+```
 
-见 [`docs/ios-shortcut-setup.md`](./docs/ios-shortcut-setup.md)。
+`401` if the token doesn't match. `400` if `lat`/`lon` are missing or invalid. `502` if the stop
+list couldn't be loaded (usually a bad or missing `LTA_API_KEY`).
 
-## 参数
+## iOS Shortcut setup
 
-`GET /?lat={纬度}&lon={经度}&token={你设置的 ACCESS_TOKEN}`
+See [`docs/ios-shortcut-setup.md`](./docs/ios-shortcut-setup.md) for the full step-by-step guide.
 
-返回:纯文本,按距离由近到远列出附近站点,每个站点下列出各路线班次的预计到达时间(分钟)。
-`token` 不匹配时返回 401。
+## Known limitations / possible next steps
 
-## 已知限制 / 后续可优化方向
+- Nearest stops are picked purely by straight-line distance (currently top 4, to reasonably cover
+  both directions of a road). There's no reliable, documented pattern in LTA's bus stop codes for
+  identifying "the stop across the road" directly — distance is the sturdiest general approach
+  available.
+- No built-in rate limiting beyond the access-token gate. Cloudflare's dashboard-level Rate
+  Limiting Rules (or a simple KV-based counter) would be a reasonable addition if this endpoint
+  is ever exposed more broadly.
 
-- 目前按纯距离取最近 N 个站点(当前 N=4),没有做"对向站台"识别 —— LTA 站牌编号本身
-  没有公开的、可靠的对向配对规律,纯距离是目前最稳妥的做法
+## License
+
+MIT — see [LICENSE](./LICENSE).
