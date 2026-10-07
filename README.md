@@ -46,8 +46,8 @@ flowchart LR
   so most requests skip the expensive full re-fetch
 - **Shared-secret access token** — the endpoint isn't wide open to anyone who finds the URL
 - **Per-customer tokens (optional)** — to sell or hand out access: each token has its own expiry,
-  daily request limit and usage stats, and can be renewed, revoked or replaced on its own. See
-  [Selling access](#selling-access)
+  daily request limit and usage stats, and can be renewed, revoked or replaced on its own. Stripe
+  payments can issue and renew them automatically. See [Selling access](#selling-access)
 - **Single file, no build step** — deploy straight from the Cloudflare dashboard, no `npm install`
   required (though a `wrangler.toml` is included if you prefer the CLI)
 
@@ -189,6 +189,62 @@ JSON responses for customer tokens also include `pass` (plan, expiry, daily limi
 See [Sharing the Shortcut](./docs/ios-shortcut-setup.md#sharing-the-shortcut-with-customers) for
 handing the Shortcut out so each customer pastes in their own token.
 
+### Selling with Stripe
+
+With this set up, a customer pays through a Stripe Payment Link, lands on a page showing their new
+token and a link to add the Shortcut, and is set up — no manual step on your side. Subscriptions
+keep their token valid for as long as they're paid.
+
+1. Run the migrations again (`wrangler d1 migrations apply sg-bus-nearest --remote`) — or paste
+   [`migrations/0002_stripe.sql`](./migrations/0002_stripe.sql) into the D1 Console — to add the
+   Stripe columns.
+2. In Stripe, create a Payment Link per product: a one-off price for passes, or a recurring price
+   for subscriptions.
+3. Give each Payment Link a `plan` **metadata** entry: `trial`, `monthly`, `yearly` or `lifetime`.
+   Stripe copies it onto every purchase, so customers can't swap in a different plan. Optional
+   `days` and `daily_limit` entries override the plan's defaults, e.g. `plan=monthly` + `days=92` for
+   a 3-month pass. If the Payment Link editor doesn't offer metadata, set it through the API:
+
+   ```bash
+   curl https://api.stripe.com/v1/payment_links/plink_XXXX -u "sk_live_XXXX:" -d "metadata[plan]=monthly"
+   ```
+
+4. On each Payment Link's **Confirmation page** tab, choose **Don't show confirmation page** and
+   redirect to:
+
+   ```
+   https://your-worker.your-subdomain.workers.dev/welcome?session_id={CHECKOUT_SESSION_ID}
+   ```
+
+5. **Developers → Webhooks → Add endpoint**: URL `https://your-worker…/stripe/webhook`, events
+   `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `invoice.paid` and
+   `customer.subscription.deleted`. Save its signing secret as the Worker secret
+   `STRIPE_WEBHOOK_SECRET`.
+6. Optional variables: `SHORTCUT_URL` — the iCloud link of your shared Shortcut, shown on the welcome
+   page; `RENEW_URL` — point it at your Payment Link.
+
+How purchases map onto tokens:
+
+| Stripe event | What happens |
+| --- | --- |
+| Checkout completed and paid | Token issued with the plan from metadata, the customer's email in `customer` |
+| Checkout completed, payment still pending (delayed methods) | Nothing until `checkout.session.async_payment_succeeded` |
+| `invoice.paid` on a subscription | Expiry moves to the end of the paid period + 2 days' grace — never earlier |
+| Renewal payment fails | Nothing; the token runs out at the end of the grace period, and works again if a later payment succeeds |
+| `customer.subscription.deleted` | Expiry pulled in to the moment the subscription ended (period end, or immediately) |
+| Refund or dispute | Not automatic — revoke the token with the admin API |
+
+Every handler is safe against Stripe's retries and out-of-order delivery. If a paid session has no
+valid `plan` metadata, the webhook answers `400` so it shows up as a failed delivery in Stripe;
+issue that customer's token by hand with the admin API.
+
+The welcome page derives the token from the Checkout session id and `STRIPE_WEBHOOK_SECRET`, so the
+customer can reopen it if they lose the token, while the database still only holds a hash. Two
+consequences: anyone with the welcome link can see that token, and after you roll the webhook
+signing secret, older welcome links can no longer show their token (the tokens keep working). A
+token replaced with `rotate` is no longer shown either. Purchases made in Stripe test mode get the
+note `Stripe test mode`.
+
 ## API
 
 ```
@@ -235,13 +291,13 @@ See [`docs/ios-shortcut-setup.md`](./docs/ios-shortcut-setup.md) for the full st
   available.
 - Customer tokens have daily limits, but requests with made-up tokens aren't throttled (each costs
   one D1 lookup). Add a Cloudflare Rate Limiting Rule if the endpoint ever gets hammered.
-- Payments aren't wired in: tokens are issued and renewed through the admin API, by hand or from a
-  payment provider's webhook.
+- Stripe refunds and disputes don't revoke tokens automatically — use the admin API.
 
 ## Tests
 
 `node --test` — Node 22+, nothing to install. Covers the output formats against mocked LTA
-responses and the full customer-token lifecycle against a local SQLite stand-in for D1.
+responses, and the customer-token lifecycle and Stripe webhooks against a local SQLite stand-in
+for D1.
 
 ## License
 

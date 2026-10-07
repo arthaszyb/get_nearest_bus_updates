@@ -21,12 +21,15 @@ compatibility_date = "2024-01-01"
 # database_name = "sg-bus-nearest"
 # database_id = "your-d1-database-id"
 
-# Optional: link shown to customers whose pass has expired or is about to.
+# Optional: link shown to customers whose pass has expired or is about to, and the
+# iCloud link of the shared Shortcut, shown on the post-payment welcome page.
 # [vars]
 # RENEW_URL = "https://your-payment-link"
+# SHORTCUT_URL = "https://www.icloud.com/shortcuts/..."
 
-# Secrets (LTA_API_KEY, ACCESS_TOKEN, ADMIN_SECRET) are NOT set here — never commit
-# secrets to wrangler.toml. Set them with:
+# Secrets (LTA_API_KEY, ACCESS_TOKEN, ADMIN_SECRET, STRIPE_WEBHOOK_SECRET) are NOT set
+# here — never commit secrets to wrangler.toml. Set them with:
 #   wrangler secret put LTA_API_KEY
 #   wrangler secret put ACCESS_TOKEN
 #   wrangler secret put ADMIN_SECRET
+#   wrangler secret put STRIPE_WEBHOOK_SECRET

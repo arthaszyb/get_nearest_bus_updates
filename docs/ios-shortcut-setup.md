@@ -51,7 +51,8 @@ iOS ask each person for their own token when they add it:
    the prompt to something like "Paste your access token".
 3. **Clear your own token out of the Text action** (leave a placeholder like `paste-token-here`) —
    whatever is in it when you share becomes the default answer everyone sees.
-4. Share → **Copy iCloud Link**, and send that link along with each customer's token.
+4. Share → **Copy iCloud Link**, and send that link along with each customer's token. If you sell
+   through Stripe, set it as the Worker's `SHORTCUT_URL` and the welcome page hands it out for you.
 
 Renewing a customer (`extend`) keeps their token, so they never need to touch the Shortcut again.
 Only `rotate` gives them a new token to paste in.

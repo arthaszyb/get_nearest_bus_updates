@@ -1,25 +1,10 @@
 // Customer-token lifecycle against a real SQLite database standing in for D1.
 // Run with `node --test` (Node 22+, for node:sqlite).
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
 import worker from '../worker/bus-nearest-worker.js';
+import { createD1 } from './d1.mjs';
 
-// --- D1 stand-in backed by real SQLite, schema from the repo's migration ---
-const sqlite = new DatabaseSync(':memory:');
-sqlite.exec(readFileSync(new URL('../migrations/0001_create_tokens.sql', import.meta.url), 'utf8'));
-const DB = {
-  prepare(sql) {
-    const stmt = sqlite.prepare(sql);
-    let args = [];
-    const api = {
-      bind: (...a) => { assert.ok(!a.includes(undefined), `undefined bound in: ${sql}`); args = a; return api; },
-      first: async () => { const r = stmt.get(...args); return r ? { ...r } : null; },
-      all: async () => ({ results: stmt.all(...args).map((r) => ({ ...r })) }),
-    };
-    return api;
-  },
-};
+const { DB, sqlite } = createD1();
 
 // --- LTA stand-in + controllable clock ---
 const DAY = 86400000;
