@@ -86,7 +86,7 @@ const token = html.match(/id="token">(sgb_[a-z0-9]{32})</)?.[1];
 assert.ok(token, 'welcome page shows the token');
 assert.ok(!html.includes('http-equiv="refresh"'));
 assert.match(html, /<meta name="referrer" content="no-referrer">/);
-assert.match(html, /<a href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Add the Shortcut<\/a>/);
+assert.match(html, /location\.href = &quot;https:\/\/www\.icloud\.com\/shortcuts\/abc&quot;[^>]*>Copy token &amp; open the Shortcut</);
 assert.match(html, /Yearly pass · Valid until 8 Oct 2027 · 300 checks a day · ref tk_/);
 assert.equal(await busStatus(token), 200, 'issued token works');
 assert.equal(await tokenFromWelcome('cs_live_one'), token, 'revisiting shows the same token');

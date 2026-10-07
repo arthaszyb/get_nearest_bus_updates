@@ -190,8 +190,8 @@ curl -X POST $W/admin/tokens/tk_abcd2345/rotate -H "$A"
 With `format=html` these show as a styled page; with `format=json` as `{ "error", "renewUrl" }`.
 JSON responses for customer tokens also include `pass` (plan, expiry, daily limit, used today).
 
-See [Sharing the Shortcut](./docs/ios-shortcut-setup.md#sharing-the-shortcut-with-customers) for
-handing the Shortcut out so each customer pastes in their own token.
+See [Building and sharing the Shortcut](./docs/ios-shortcut-setup.md) for the one Shortcut every
+customer installs: free with no setup, or with their token pasted in at install time.
 
 ### Website
 
@@ -200,7 +200,8 @@ Once `DB` is bound, the Worker also serves the customer-facing site:
 | Path | Page |
 | --- | --- |
 | `/` (no `lat`/`token`) | Landing page: what it does, a live-looking demo, how it works, pricing |
-| `POST /free` | "Get free pass" button: issues a `free` pass (30 days, 4 checks a day) and shows the token once |
+| `POST /free` | Issues a `free` token (30 days, 4 a day) — what "Get free pass" does until `SHORTCUT_URL` is set; after that the button installs the Shortcut, since free needs no token |
+| `/install` | Customer install guide with a one-tap "Add BusNearby to iPhone" button |
 | `/?lat=…&lon=…&device=…` | Built-in free tier, no token: 4 checks a day per device (see the Shortcut guide) |
 | `/welcome` | After a Stripe payment: the customer's token (see below) |
 | `/privacy`, `/terms` | Privacy policy and terms — templates, have them reviewed before launch |
@@ -319,7 +320,8 @@ bad or missing `LTA_API_KEY`).
 
 ## iOS Shortcut setup
 
-See [`docs/ios-shortcut-setup.md`](./docs/ios-shortcut-setup.md) for the full step-by-step guide.
+See [`docs/ios-shortcut-setup.md`](./docs/ios-shortcut-setup.md) for building and sharing the Shortcut.
+Customers follow the website's `/install` page.
 
 ## Known limitations / possible next steps
 

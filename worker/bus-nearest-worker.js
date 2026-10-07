@@ -836,6 +836,7 @@ function siteFooter(env, now) {
   const links = [
     env.MANAGE_URL && `<a href="${escapeHtml(env.MANAGE_URL)}">Manage subscription</a>`,
     '<a href="/privacy">Privacy</a>',
+    '<a href="/install">Install guide</a>',
     '<a href="/terms">Terms</a>',
     env.SUPPORT_EMAIL && `<a href="mailto:${escapeHtml(env.SUPPORT_EMAIL)}">Contact</a>`,
   ].filter(Boolean);
@@ -856,9 +857,16 @@ function passPage(token, row, env, { revisitable }) {
       ? `Valid until ${formatDate(row.expires_at)}`
       : 'Never expires';
   const limit = row.daily_limit === null ? '' : ` · ${row.daily_limit} checks a day`;
-  const shortcutStep = env.SHORTCUT_URL
-    ? `<li><a href="${escapeHtml(env.SHORTCUT_URL)}">Add the Shortcut</a> and paste the token when it asks.</li>`
-    : '<li>Paste it into the Shortcut where it asks for your access token.</li>';
+  // With the Shortcut's link, one tap copies the token and opens the Shortcut, ready to paste.
+  const copy = "navigator.clipboard.writeText(document.getElementById('token').textContent)";
+  const button = env.SHORTCUT_URL
+    ? `<button type="button" onclick="${copy}.finally(() => { location.href = ${escapeHtml(JSON.stringify(env.SHORTCUT_URL))}; })">Copy token &amp; open the Shortcut</button>`
+    : `<button type="button" onclick="${copy}.then(() => { this.textContent = 'Copied ✓'; })">Copy token</button>`;
+  const steps = env.SHORTCUT_URL
+    ? `<li>Tap the button above — it copies your token and opens the Shortcut.</li>
+    <li>Tap <b>Add Shortcut</b> (or <b>Replace</b> if you already have it) and paste the token when it asks.</li>`
+    : `<li>Copy the token above.</li>
+    <li>Paste it into the Shortcut where it asks for your access token.</li>`;
   const keep = revisitable
     ? 'Keep this page private: anyone with its link can see your token. You can come back to it if you lose the token.'
     : '<b>Save your token now</b> — for your security it can’t be shown again.';
@@ -870,14 +878,13 @@ function passPage(token, row, env, { revisitable }) {
 <div class="card pad">
   <p class="muted">Your access token</p>
   <div class="token" id="token">${escapeHtml(token)}</div>
-  <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('token').textContent).then(() => { this.textContent = 'Copied ✓'; })">Copy token</button>
+  ${button}
 </div>
 <div class="card pad">
   <h2>Set up on your iPhone</h2>
   <ol>
-    <li>Copy the token above.</li>
-    ${shortcutStep}
-    <li>Tap the Shortcut whenever you want to see the buses near you.</li>
+    ${steps}
+    <li>Tap the Shortcut whenever you want to see the buses near you. <a href="/install">Install guide</a></li>
   </ol>
 </div>
 <p class="muted small">${escapeHtml(capitalize(row.plan))} pass · ${validity}${limit} · ref ${escapeHtml(row.id)}${upgrade}<br>${keep}</p>`,
@@ -991,7 +998,9 @@ function renderLanding(env, now) {
       <div class="was"></div>
       <div class="price">${CURRENCY}0</div>
       <ul><li>${ANONYMOUS_DAILY_LIMIT} checks a day</li><li>Built in — no sign-up, no token</li><li>Just add the Shortcut and tap</li></ul>
-      <form method="post" action="/free"><button type="submit" class="btn secondary">Get free pass</button></form>
+      ${env.SHORTCUT_URL
+        ? `<a class="btn secondary" href="${escapeHtml(env.SHORTCUT_URL)}">Get free pass</a>`
+        : '<form method="post" action="/free"><button type="submit" class="btn secondary">Get free pass</button></form>'}
       <p class="muted small" style="margin:0">Free is on by default — you don't need a pass to use it.</p>
     </div>
     ${paidCards}
@@ -1001,6 +1010,50 @@ function renderLanding(env, now) {
 
 ${siteFooter(env, now)}`,
     `${PRODUCT_NAME} — live bus arrivals near you, in one tap`
+  );
+}
+
+function renderInstall(env, now) {
+  const add = env.SHORTCUT_URL
+    ? `<a class="btn" href="${escapeHtml(env.SHORTCUT_URL)}">Add ${PRODUCT_NAME} to iPhone</a>`
+    : '<button type="button" disabled style="opacity:.5">Coming soon</button>';
+  return sitePage(
+    `${brand}
+<article class="legal">
+  <h1>Install ${PRODUCT_NAME}</h1>
+  <p>${PRODUCT_NAME} runs as an Apple Shortcut on your iPhone. Setup takes under a minute and needs no account.</p>
+  <div style="max-width:320px;margin:20px 0">${add}</div>
+
+  <h2>1. Add the Shortcut</h2>
+  <p>On your iPhone, tap the button above. The Shortcuts app opens; tap <b>Add Shortcut</b>.</p>
+
+  <h2>2. Access token: leave it empty, or paste yours</h2>
+  <p>It asks for an access token. <b>Leave it empty to use the free plan</b> — ${ANONYMOUS_DAILY_LIMIT} checks a day, nothing to sign up for. If you've subscribed, paste the token from the page you saw after paying.</p>
+
+  <h2>3. Run it once and allow access</h2>
+  <p>Tap the Shortcut. The first time, iOS asks to use your location and to connect to ${PRODUCT_NAME}'s server — tap <b>Allow</b> (or <b>Always Allow</b>) for both. After that it opens straight to the buses near you.</p>
+
+  <h2>4. Keep it one tap away</h2>
+  <ul>
+    <li><b>Home Screen:</b> in Shortcuts, touch and hold ${PRODUCT_NAME} › Share › Add to Home Screen.</li>
+    <li><b>Widget:</b> add a Shortcuts widget to your Home Screen or Lock Screen and pick ${PRODUCT_NAME}.</li>
+    <li><b>Action button</b> (iPhone 15 Pro and later): Settings › Action Button › Shortcut › ${PRODUCT_NAME}.</li>
+    <li><b>Siri:</b> say "Hey Siri, ${PRODUCT_NAME}".</li>
+  </ul>
+
+  <h2>Upgrading later</h2>
+  <p>Pick a plan on the <a href="/#pricing">pricing page</a>. After paying, tap <b>Copy token &amp; open the Shortcut</b>, choose <b>Replace</b>, and paste the token when asked.</p>
+
+  <h2>If something's off</h2>
+  <ul>
+    <li><b>"You've used today's ${ANONYMOUS_DAILY_LIMIT} free checks"</b> — the free plan resets at midnight, or <a href="/#pricing">upgrade</a>.</li>
+    <li><b>It can't find your location</b> — Settings › Privacy &amp; Security › Location Services › Shortcuts › While Using the App.</li>
+    <li><b>"Invalid access token"</b> — re-add the Shortcut from the button above and paste the token again, or leave it empty for the free plan.</li>
+    <li><b>The link opens a web page instead of the Shortcuts app</b> — open it on your iPhone, in Safari.</li>
+  </ul>
+</article>
+${siteFooter(env, now)}`,
+    `Install — ${PRODUCT_NAME}`
   );
 }
 
@@ -1093,6 +1146,7 @@ export default {
       if (url.pathname === '/' && !isApiCall) return renderLanding(env, now);
       if (url.pathname === '/privacy') return renderPrivacy(env, now);
       if (url.pathname === '/terms') return renderTerms(env, now);
+      if (url.pathname === '/install') return renderInstall(env, now);
     }
 
     const format = url.searchParams.get('format');
