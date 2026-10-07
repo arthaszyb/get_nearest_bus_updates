@@ -45,6 +45,9 @@ flowchart LR
 - **KV-backed caching** — the ~5,000-stop list is cached for 7 days (coordinates rarely change),
   so most requests skip the expensive full re-fetch
 - **Shared-secret access token** — the endpoint isn't wide open to anyone who finds the URL
+- **Per-customer tokens (optional)** — to sell or hand out access: each token has its own expiry,
+  daily request limit and usage stats, and can be renewed, revoked or replaced on its own. See
+  [Selling access](#selling-access)
 - **Single file, no build step** — deploy straight from the Cloudflare dashboard, no `npm install`
   required (though a `wrangler.toml` is included if you prefer the CLI)
 
@@ -96,18 +99,110 @@ Cached data expires automatically after 7 days. To force a refresh sooner, call 
 This binding is optional — the Worker falls back to a live fetch every request if it's absent, so
 nothing breaks if you skip this step.
 
+## Selling access
+
+`ACCESS_TOKEN` is one shared secret — fine for yourself, but anyone you give it to has it forever.
+To hand out access per customer, add a D1 database:
+
+1. Create the database and its table:
+
+   ```bash
+   wrangler d1 create sg-bus-nearest --location apac
+   # paste the database_id it prints into wrangler.toml ([[d1_databases]], binding = "DB")
+   wrangler d1 migrations apply sg-bus-nearest --remote
+   ```
+
+   Dashboard instead: **Storage & Databases → D1 → Create**, paste
+   [`migrations/0001_create_tokens.sql`](./migrations/0001_create_tokens.sql) into the database's
+   **Console**, then bind it to the Worker as `DB` under **Settings → Bindings**.
+2. Add a secret `ADMIN_SECRET` — a long random string. It unlocks the admin API below.
+3. Optional: add a plain variable `RENEW_URL` — your payment link, shown to customers whose pass has
+   expired or expires within 3 days.
+4. Redeploy.
+
+Your own `ACCESS_TOKEN` keeps working as before, with no expiry or limit.
+
+### What a token carries
+
+| Setting | Meaning |
+| --- | --- |
+| `plan` | `trial` / `monthly` / `yearly` / `lifetime`. Sets the default length and daily limit (`PLANS` at the top of the worker); both can be overridden per token |
+| `expiresAt` | When it stops working. `null` = never |
+| `startOnFirstUse` | For codes handed out ahead of time (promos, gifts): the days start counting at the first request instead of at issue |
+| `dailyLimit` | Max requests per Singapore calendar day, reset at midnight SGT. `null` = unlimited. Caps your cost and makes one token shared among many people impractical. Every request counts, including the HTML view's 30-second auto-refresh |
+| `status` | `active` or `revoked` |
+| `customer`, `note` | Free text for your records, e.g. email and payment reference |
+
+The admin API also reports each token's `state` (`active` / `unused` / `expired` / `revoked`),
+`usedToday`, `totalRequests`, `firstUsedAt` and `lastUsedAt` — handy for support and for spotting
+a token that's being shared.
+
+Tokens look like `sgb_` followed by 32 random characters. Only a SHA-256 hash is stored, so a leaked
+database doesn't leak working tokens. A lost token therefore can't be looked up again, only replaced
+with `rotate`.
+
+### Admin API
+
+Every call needs `Authorization: Bearer <ADMIN_SECRET>`. With `ADMIN_SECRET` unset, `/admin/*`
+returns `404`.
+
+```bash
+W=https://your-worker.your-subdomain.workers.dev
+A="Authorization: Bearer $ADMIN_SECRET"
+
+# Issue — the token is only ever shown in this response
+curl -X POST $W/admin/tokens -H "$A" -d '{"plan":"monthly","customer":"alice@example.com"}'
+# Trial code whose 7 days start on first use
+curl -X POST $W/admin/tokens -H "$A" -d '{"plan":"trial","startOnFirstUse":true}'
+# Override the plan defaults
+curl -X POST $W/admin/tokens -H "$A" -d '{"plan":"yearly","days":400,"dailyLimit":500}'
+
+# Look up one, or list (newest first, optional ?customer= and ?limit=)
+curl $W/admin/tokens/tk_abcd2345 -H "$A"
+curl "$W/admin/tokens?customer=alice@example.com" -H "$A"
+
+# Renew: adds the days to the current expiry, or to now if it already expired.
+# The customer keeps the same token — nothing to change in their Shortcut.
+curl -X POST $W/admin/tokens/tk_abcd2345/extend -H "$A" -d '{"days":31}'
+
+# Revoke or reactivate, change the limit, or set an exact expiry
+curl -X PATCH $W/admin/tokens/tk_abcd2345 -H "$A" -d '{"status":"revoked"}'
+curl -X PATCH $W/admin/tokens/tk_abcd2345 -H "$A" -d '{"dailyLimit":100,"expiresAt":"2027-01-01T00:00:00+08:00"}'
+
+# Replace a leaked or shared token: new token, same expiry and history; the old one stops at once
+curl -X POST $W/admin/tokens/tk_abcd2345/rotate -H "$A"
+```
+
+### What customers see
+
+| Situation | Status | Message |
+| --- | --- | --- |
+| Unknown token | `401` | Invalid access token. Check the token in your Shortcut. |
+| Revoked | `403` | This access token has been disabled. |
+| Expired | `402` | Your pass expired on 7 Nov 2026. + renew link |
+| Over the daily limit | `429` | Daily limit of 300 requests reached. It resets at midnight (SGT). |
+| Expires within 3 days | `200` | A ⚠️ line above the arrivals, with the renew link |
+
+With `format=html` these show as a styled page; with `format=json` as `{ "error", "renewUrl" }`.
+JSON responses for customer tokens also include `pass` (plan, expiry, daily limit, used today).
+
+See [Sharing the Shortcut](./docs/ios-shortcut-setup.md#sharing-the-shortcut-with-customers) for
+handing the Shortcut out so each customer pastes in their own token.
+
 ## API
 
 ```
-GET /?lat={latitude}&lon={longitude}&token={your ACCESS_TOKEN}
+GET /?lat={latitude}&lon={longitude}&token={your ACCESS_TOKEN or a customer token}
 ```
+
+The token can also be sent as an `Authorization: Bearer` header.
 
 Optional:
 
 - `&format=html` — a styled, dark-mode-aware page (stop cards, colour-coded crowding, auto-refresh
   every 30s). Open it with the Shortcut's **Show Web Page** action.
 - `&format=json` — the same data as structured JSON, for building your own front end.
-- `&refresh=1` — bypass the stop-list cache for this request.
+- `&refresh=1` — bypass the stop-list cache for this request. Owner token only.
 
 By default it returns `text/plain`: nearest stops first, one line per bus service (sorted 49, 98,
 98M, 154…), the next three arrivals in minutes, each prefixed with a crowding dot. Example:
@@ -124,8 +219,9 @@ No arrival info
 🟢 Seats  🟡 Standing  🔴 Full
 ```
 
-`401` if the token doesn't match. `400` if `lat`/`lon` are missing or invalid. `502` if the stop
-list couldn't be loaded (usually a bad or missing `LTA_API_KEY`).
+`400` if `lat`/`lon` are missing or invalid. `401` / `402` / `403` / `429` for token problems —
+see [What customers see](#what-customers-see). `502` if the stop list couldn't be loaded (usually a
+bad or missing `LTA_API_KEY`).
 
 ## iOS Shortcut setup
 
@@ -137,9 +233,15 @@ See [`docs/ios-shortcut-setup.md`](./docs/ios-shortcut-setup.md) for the full st
   both directions of a road). There's no reliable, documented pattern in LTA's bus stop codes for
   identifying "the stop across the road" directly — distance is the sturdiest general approach
   available.
-- No built-in rate limiting beyond the access-token gate. Cloudflare's dashboard-level Rate
-  Limiting Rules (or a simple KV-based counter) would be a reasonable addition if this endpoint
-  is ever exposed more broadly.
+- Customer tokens have daily limits, but requests with made-up tokens aren't throttled (each costs
+  one D1 lookup). Add a Cloudflare Rate Limiting Rule if the endpoint ever gets hammered.
+- Payments aren't wired in: tokens are issued and renewed through the admin API, by hand or from a
+  payment provider's webhook.
+
+## Tests
+
+`node --test` — Node 22+, nothing to install. Covers the output formats against mocked LTA
+responses and the full customer-token lifecycle against a local SQLite stand-in for D1.
 
 ## License
 

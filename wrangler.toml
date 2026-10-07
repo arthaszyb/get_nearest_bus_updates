@@ -13,7 +13,20 @@ compatibility_date = "2024-01-01"
 # binding = "BUS_STOPS_KV"
 # id = "your-kv-namespace-id"
 
-# Secrets (LTA_API_KEY, ACCESS_TOKEN) are NOT set here — never commit secrets
-# to wrangler.toml. Set them with:
+# Optional: D1 database for selling per-customer access tokens (see README > Selling access).
+# Create it with `wrangler d1 create sg-bus-nearest --location apac`, uncomment and fill in
+# the id it gives you, then `wrangler d1 migrations apply sg-bus-nearest --remote`.
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "sg-bus-nearest"
+# database_id = "your-d1-database-id"
+
+# Optional: link shown to customers whose pass has expired or is about to.
+# [vars]
+# RENEW_URL = "https://your-payment-link"
+
+# Secrets (LTA_API_KEY, ACCESS_TOKEN, ADMIN_SECRET) are NOT set here — never commit
+# secrets to wrangler.toml. Set them with:
 #   wrangler secret put LTA_API_KEY
 #   wrangler secret put ACCESS_TOKEN
+#   wrangler secret put ADMIN_SECRET
