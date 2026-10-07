@@ -19,6 +19,11 @@ const PLANS = {
   lifetime: { days: null, dailyLimit: 300 },
 };
 const EXPIRY_WARNING_DAYS = 3;
+// Built-in free tier: requests without a token get this many a day, counted per device. iOS gives
+// Shortcuts no stable device ID, so the "device" is a hash of the details the Shortcut sends
+// (name, model, OS version, screen) — a soft limit, which is fine at this cost.
+const ANONYMOUS_DAILY_LIMIT = 4;
+const MAX_DEVICE_LENGTH = 300;
 // Subscription tokens stay valid this long past the paid period, to cover Stripe's renewal lag and retries.
 const SUBSCRIPTION_GRACE_DAYS = 2;
 const STRIPE_SIGNATURE_TOLERANCE_SECONDS = 300;
@@ -224,7 +229,12 @@ async function authorize(request, url, env, now) {
     // No customer tokens configured: only the owner token gates access (or nothing, if unset).
     return env.ACCESS_TOKEN ? { error: { status: 401, message: 'Unauthorized' } } : { owner: true };
   }
-  if (!token) return { error: { status: 401, message: 'Missing access token.' } };
+  if (!token) {
+    const device = url.searchParams.get('device')?.trim();
+    if (!device) return { error: { status: 401, message: 'Missing access token.' } };
+    if (device.length > MAX_DEVICE_LENGTH) return { error: { status: 400, message: 'Invalid device.' } };
+    return authorizeAnonymous(env, device, now);
+  }
 
   const pass = await recordUse(env.DB, await sha256(token), now);
   if (!pass) {
@@ -246,6 +256,34 @@ async function authorize(request, url, env, now) {
     };
   }
   return { pass };
+}
+
+// Counts a token-less request against its device's daily free allowance. Returns a pass-shaped
+// object so the renderers treat it like a free pass.
+async function authorizeAnonymous(env, device, now) {
+  // Salted so the stored key can't be matched against guessed device names.
+  const deviceKey = await sha256(`device:${device}:${env.ADMIN_SECRET ?? ''}`);
+  const { usage_count: used } = await env.DB.prepare(
+    `INSERT INTO anonymous_usage (device_key, usage_day, usage_count, first_seen_at, last_used_at)
+     VALUES (?1, ?2, 1, ?3, ?3)
+     ON CONFLICT (device_key) DO UPDATE SET
+       usage_count = CASE WHEN usage_day = ?2 THEN usage_count + 1 ELSE 1 END,
+       usage_day = ?2,
+       last_used_at = ?3
+     RETURNING usage_count`
+  )
+    .bind(deviceKey, sgtDay(now), now)
+    .first();
+  if (used > ANONYMOUS_DAILY_LIMIT) {
+    return {
+      error: {
+        status: 429,
+        message: `You've used today's ${ANONYMOUS_DAILY_LIMIT} free checks. They reset at midnight (SGT).`,
+        renew: 'Upgrade',
+      },
+    };
+  }
+  return { pass: { plan: 'free', expires_at: null, daily_limit: ANONYMOUS_DAILY_LIMIT, usage_count: used } };
 }
 
 function expiryWarning(pass, now) {
@@ -917,7 +955,7 @@ function renderLanding(env, now) {
 <section class="hero">
   <h1>Which bus is coming?<br>One tap.</h1>
   <p class="lead">${PRODUCT_NAME} finds the bus stops nearest you — both sides of the road — and shows live arrival times and how full each bus is. No app to install, no stop codes to look up.</p>
-  <a class="btn" href="#pricing">Try it free</a>
+  <a class="btn" href="${escapeHtml(env.SHORTCUT_URL || '#pricing')}">Try it free</a>
 </section>
 
 <section class="demo" aria-label="Example">
@@ -928,9 +966,9 @@ function renderLanding(env, now) {
 <section>
   <h2>How it works</h2>
   <ol class="steps">
-    <li><b>Get a pass</b> — free to start, below.</li>
-    <li><b>Add the Shortcut</b> to your iPhone and paste your pass when it asks.</li>
-    <li><b>Tap it</b> from your Home Screen, a widget, Siri or the Action button. That's it.</li>
+    <li><b>Add the Shortcut</b> to your iPhone. That's all the setup there is.</li>
+    <li><b>Tap it</b> from your Home Screen, a widget, Siri or the Action button. ${ANONYMOUS_DAILY_LIMIT} checks a day are free, no sign-up.</li>
+    <li><b>Need more?</b> Subscribe below and paste your token into the Shortcut.</li>
   </ol>
 </section>
 
@@ -952,8 +990,9 @@ function renderLanding(env, now) {
       <h3>Free</h3>
       <div class="was"></div>
       <div class="price">${CURRENCY}0</div>
-      <ul><li>${PLANS.free.dailyLimit} checks a day</li><li>Valid for ${PLANS.free.days} days</li><li>No card needed</li></ul>
+      <ul><li>${ANONYMOUS_DAILY_LIMIT} checks a day</li><li>Built in — no sign-up, no token</li><li>Just add the Shortcut and tap</li></ul>
       <form method="post" action="/free"><button type="submit" class="btn secondary">Get free pass</button></form>
+      <p class="muted small" style="margin:0">Free is on by default — you don't need a pass to use it.</p>
     </div>
     ${paidCards}
   </div>
@@ -979,6 +1018,7 @@ function renderPrivacy(env, now) {
     <li><b>Your location, at the moment you check.</b> Used to find the nearest bus stops, then discarded. It is not saved by the service. Only bus stop codes are sent on to the Land Transport Authority.</li>
     <li><b>Your email address and Stripe customer and subscription IDs</b>, if you buy a plan. Used to run your subscription, renew or end your pass, and answer support requests.</li>
     <li><b>Usage counts for your pass</b> — how many checks today and in total, and when it was last used. Used to apply the daily limit and to stop passes being shared.</li>
+    <li><b>A one-way code derived from your device's details</b> (its name, model, iOS version and screen size), if you use the free tier without a token. The Shortcut sends these details; we keep only the code and a count of today's checks, to apply the free daily limit. The details themselves aren't stored.</li>
     <li><b>A one-way, daily-changing code derived from your network address</b>, if you get a free pass. Used only to limit how many free passes one network can create in a day; it can't be turned back into your address.</li>
   </ul>
   <p>Payment card details go directly to Stripe and never reach us.</p>

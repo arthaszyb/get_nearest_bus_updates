@@ -40,6 +40,22 @@ The steps above show the plain-text version in iOS's built-in result sheet. For 
 
 Don't use **Quick Look** for this — it doesn't reliably render HTML pages.
 
+## Free tier without a token
+
+If the Worker sells passes (D1 bound), requests without a token get 4 free checks a day per device.
+iOS doesn't give Shortcuts a stable device ID, so the Shortcut sends its device details and the Worker
+counts by a one-way hash of them:
+
+1. Before the **URL** action, add **Get Device Details** four times (or once per detail) for
+   *Device Name*, *Device Model*, *System Version* and *Screen Width*.
+2. Add a **Text** action joining them, e.g. `Device Name|Device Model|System Version|Screen Width`
+   (insert each as a variable), then a **URL Encode** action on that text.
+3. In the URL, replace `&token=…` with `&device=` followed by the URL Encode result. Keep the
+   `&token=` part too if you want the Shortcut to use a paid token when one is filled in — a token,
+   when present, always takes precedence.
+
+When a device has used its 4 checks, the response says so and links to upgrading.
+
 ## Sharing the Shortcut with customers
 
 If you sell access with per-customer tokens (see the main README), share one Shortcut and have

@@ -201,6 +201,7 @@ Once `DB` is bound, the Worker also serves the customer-facing site:
 | --- | --- |
 | `/` (no `lat`/`token`) | Landing page: what it does, a live-looking demo, how it works, pricing |
 | `POST /free` | "Get free pass" button: issues a `free` pass (30 days, 4 checks a day) and shows the token once |
+| `/?lat=…&lon=…&device=…` | Built-in free tier, no token: 4 checks a day per device (see the Shortcut guide) |
 | `/welcome` | After a Stripe payment: the customer's token (see below) |
 | `/privacy`, `/terms` | Privacy policy and terms — templates, have them reviewed before launch |
 
