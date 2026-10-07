@@ -35,7 +35,9 @@ assert.match(html, /Save 17%/); // 18.90 vs 12 × 1.90
 assert.match(html, /href="https:\/\/buy\.stripe\.com\/monthly-launch">Subscribe/);
 assert.match(html, /href="https:\/\/buy\.stripe\.com\/yearly-launch">Subscribe/);
 assert.match(html, /<form method="post" action="\/free">/);
-assert.match(html, /4 checks a day<\/li><li>Valid for 30 days/);
+assert.match(html, /4 checks a day<\/li><li>Built in — no sign-up, no token/);
+assert.match(html, /Free is on by default — you don't need a pass to use it\./);
+assert.match(html, /<a class="btn" href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Try it free/);
 assert.match(html, /href="https:\/\/billing\.stripe\.com\/p\/login\/abc">Manage subscription/);
 assert.match(html, /Contains information from LTA DataMall accessed on 7 Oct 2026/);
 assert.match(html, /class="row"><span class="svc">49<\/span>/, 'demo cards rendered');
@@ -114,3 +116,26 @@ clock = Date.parse('2026-10-07T01:00:00Z') + 30 * DAY;
 res = await bus();
 assert.equal(res.status, 402);
 assert.equal(await res.text(), 'Your pass expired on 6 Nov 2026.\nRenew: https://x.dev/#pricing');
+
+// --- Built-in free tier: no token, counted per device ---
+clock = Date.parse('2026-10-08T01:00:00Z');
+const anon = (device, format = '') =>
+  get(`/?lat=1.3442&lon=103.721${device === undefined ? '' : `&device=${encodeURIComponent(device)}`}${format}`);
+const phone = "Arthas's iPhone|iPhone17,1|26.0|402";
+for (let i = 1; i <= 4; i++) {
+  res = await anon(phone, '&format=json');
+  assert.equal(res.status, 200);
+  assert.deepEqual((await res.json()).pass, { plan: 'free', expiresAt: null, dailyLimit: 4, usedToday: i });
+}
+html = await (await anon('Other|iPhone16,2|26.0|430', '&format=html')).text();
+assert.ok(!html.includes('http-equiv="refresh"'), 'free tier is not auto-refreshed');
+res = await anon(phone);
+assert.equal(res.status, 429);
+assert.equal(await res.text(), "You've used today's 4 free checks. They reset at midnight (SGT).\nUpgrade: https://x.dev/#pricing");
+assert.ok(!JSON.stringify(sqlite.prepare('SELECT * FROM anonymous_usage').all()).includes('iPhone'), 'device details not stored');
+clock = Date.parse('2026-10-08T16:01:00Z'); // just past midnight SGT
+assert.equal((await anon(phone)).status, 200, 'resets at midnight SGT');
+assert.equal((await anon(undefined)).status, 401, 'no token and no device');
+assert.equal((await anon('   ')).status, 401);
+assert.equal((await anon('x'.repeat(301))).status, 400);
+assert.equal((await get('/?lat=1.3442&lon=103.721&device=x', { ACCESS_TOKEN: 'owner', LTA_API_KEY: 'k' })).status, 401, 'free tier needs the DB');
