@@ -46,18 +46,6 @@ const LTA_PAGE_SIZE = 500;
 const LTA_CONCURRENCY = 4;
 const NEAREST_STOPS = 3;
 
-// Which services call at each stop, from LTA's BusRoutes (~26,000 rows, ~53 pages). Too big to load
-// during a request, so it's built in the background a few pages at a time — by the cron trigger and
-// by requests that find it missing — and swapped in once complete.
-const ROUTES_CACHE_KEY = 'bus_routes_by_stop';
-const ROUTES_JOB_KEY = 'bus_routes_job';
-const ROUTES_LOCK_KEY = 'bus_routes_job_lock';
-const ROUTES_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-// Pages per background step. With retries this stays under the Workers free plan's 50 subrequests.
-const ROUTES_PAGES_PER_STEP = 12;
-// At most one background step a minute (KV's minimum expiry), to go easy on LTA.
-const ROUTES_LOCK_SECONDS = 60;
-
 // One page of an LTA dataset, retried a couple of times. Returns null if it couldn't be loaded.
 async function fetchLtaPage(dataset, skip, headers) {
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -118,44 +106,6 @@ async function getAllStops(env, headers, forceRefresh) {
   return records;
 }
 
-// { updatedAt, byStop: { "18101": "14,33,97" } } or null while it hasn't been built yet.
-async function getRoutesByStop(env) {
-  return env.BUS_STOPS_KV ? env.BUS_STOPS_KV.get(ROUTES_CACHE_KEY, 'json') : null;
-}
-
-// Advances the background build of the routes table by one step, if it's missing or stale and
-// no step ran in the last minute. Idempotent: if two ever overlap they only repeat work.
-async function refreshRoutesStep(env, now, current) {
-  const kv = env.BUS_STOPS_KV;
-  if (!kv || !env.LTA_API_KEY) return;
-  if (current === undefined) current = await getRoutesByStop(env);
-  if (current && now - current.updatedAt < ROUTES_MAX_AGE_MS) return;
-  if (await kv.get(ROUTES_LOCK_KEY)) return;
-  await kv.put(ROUTES_LOCK_KEY, String(now), { expirationTtl: ROUTES_LOCK_SECONDS });
-
-  const job = (await kv.get(ROUTES_JOB_KEY, 'json')) || { nextSkip: 0, byStop: {} };
-  const headers = { AccountKey: env.LTA_API_KEY, accept: 'application/json' };
-  const { records, nextSkip, done } = await fetchLtaPages('BusRoutes', headers, {
-    skip: job.nextSkip,
-    maxPages: ROUTES_PAGES_PER_STEP,
-  });
-  for (const { BusStopCode: code, ServiceNo: no } of records) {
-    const services = (job.byStop[code] ||= []);
-    if (!services.includes(no)) services.push(no);
-  }
-
-  if (done) {
-    const byStop = Object.fromEntries(
-      Object.entries(job.byStop).map(([code, services]) => [code, services.sort(compareServiceNo).join(',')])
-    );
-    await kv.put(ROUTES_CACHE_KEY, JSON.stringify({ updatedAt: now, byStop }));
-    await kv.delete(ROUTES_JOB_KEY);
-  } else {
-    await kv.put(ROUTES_JOB_KEY, JSON.stringify({ nextSkip, byStop: job.byStop }));
-  }
-  // The lock is left to expire, so this runs at most once a minute however busy the Worker is.
-}
-
 function dist(lat1, lon1, lat2, lon2) {
   const R = 6371000;
   const toRad = (d) => (d * Math.PI) / 180;
@@ -176,7 +126,7 @@ function compareServiceNo(a, b) {
 }
 
 // Turns one stop + its raw BusArrival response into the shape every output format renders from.
-function toStopModel(stop, arrival, now, routeServices) {
+function toStopModel(stop, arrival, now) {
   const services = (arrival?.Services || [])
     .map((svc) => ({
       no: svc.ServiceNo,
@@ -190,10 +140,6 @@ function toStopModel(stop, arrival, now, routeServices) {
         })),
     }))
     .sort((a, b) => compareServiceNo(a.no, b.no));
-  // LTA leaves out services with no bus in operation, so name them from the routes table instead
-  // of letting them silently vanish.
-  const listed = new Set(services.map((svc) => svc.no));
-  const notRunning = (routeServices ? routeServices.split(',') : []).filter((no) => !listed.has(no));
 
   return {
     code: stop.BusStopCode,
@@ -201,7 +147,6 @@ function toStopModel(stop, arrival, now, routeServices) {
     road: stop.RoadName,
     distance: Math.round(stop.d),
     services,
-    notRunning,
   };
 }
 
@@ -627,13 +572,12 @@ function renderText(stops, warning, renewUrl) {
   if (warning) lines.push(`⚠️ ${warning}${renewUrl ? ` Renew: ${renewUrl}` : ''}`, '');
   for (const stop of stops) {
     lines.push(`🚏 ${stop.name} · ${stop.code} · ${stop.distance}m`);
-    if (stop.services.length === 0 && stop.notRunning.length === 0) lines.push('No arrival info');
+    if (stop.services.length === 0) lines.push('No arrival info');
     for (const svc of stop.services) {
       const times = svc.buses.map((b) => `${LOAD_DOTS[b.load] || ''}${b.mins === 0 ? 'Now' : b.mins}`);
       const unit = svc.buses.at(-1)?.mins > 0 ? ' min' : '';
-      lines.push(`${svc.no}   ${times.join(' · ') || '–'}${unit}`);
+      lines.push(`${svc.no}   ${times.join(' · ') || 'N/A'}${unit}`);
     }
-    if (stop.notRunning.length) lines.push(`Not running now: ${stop.notRunning.join(', ')}`);
     lines.push('');
   }
   lines.push('🟢 Seats  🟡 Standing  🔴 Full');
@@ -776,20 +720,17 @@ function renderStopCard(stop) {
         .map(
           (svc) =>
             `<div class="row"><span class="svc">${escapeHtml(svc.no)}</span>` +
-            [0, 1, 2].map((i) => renderBusCell(svc.buses[i], i === 0)).join('') +
+            (svc.buses.length
+              ? [0, 1, 2].map((i) => renderBusCell(svc.buses[i], i === 0)).join('')
+              : '<span class="t next">N/A</span>') +
             '</div>'
         )
         .join('')
-    : stop.notRunning.length
-      ? ''
-      : '<div class="row empty">No arrival info</div>';
-  const idle = stop.notRunning.length
-    ? `<div class="row empty">Not running now: ${stop.notRunning.map(escapeHtml).join(', ')}</div>`
-    : '';
+    : '<div class="row empty">No arrival info</div>';
   const meta = [stop.code, stop.road, `${stop.distance}m away`].filter(Boolean).map(escapeHtml).join(' · ');
   return `<section class="card">
   <div class="stop"><h2>${escapeHtml(stop.name)}</h2><p>${meta}</p></div>
-  ${rows}${idle}
+  ${rows}
 </section>`;
 }
 
@@ -927,7 +868,7 @@ async function handleFreeSignup(request, env, now) {
 // What the landing page's demo shows — a typical lunchtime at Lakeside.
 const SAMPLE_STOPS = [
   {
-    code: '28091', name: 'Lakeside Stn', road: 'Boon Lay Way', distance: 90, notRunning: [],
+    code: '28091', name: 'Lakeside Stn', road: 'Boon Lay Way', distance: 90,
     services: [
       { no: '49', buses: [{ mins: 3, load: 'seats', live: true }, { mins: 12, load: 'seats', live: true }, { mins: 24, load: 'standing', live: false }] },
       { no: '180', buses: [{ mins: 0, load: 'full', live: true }, { mins: 6, load: 'standing', live: true }, { mins: 14, load: 'seats', live: true }] },
@@ -935,7 +876,7 @@ const SAMPLE_STOPS = [
     ],
   },
   {
-    code: '28099', name: 'Opp Lakeside Stn', road: 'Boon Lay Way', distance: 186, notRunning: ['98M'],
+    code: '28099', name: 'Opp Lakeside Stn', road: 'Boon Lay Way', distance: 186,
     services: [
       { no: '98', buses: [{ mins: 2, load: 'standing', live: true }, { mins: 9, load: 'seats', live: true }, { mins: 17, load: 'seats', live: true }] },
       { no: '154', buses: [{ mins: 7, load: 'seats', live: true }, { mins: 15, load: 'seats', live: true }, { mins: 26, load: 'seats', live: false }] },
@@ -1091,12 +1032,7 @@ ${siteFooter(env, now)}`,
 }
 
 export default {
-  // Cron trigger (wrangler.toml): keeps building / refreshing the routes table in the background.
-  async scheduled(controller, env, ctx) {
-    ctx.waitUntil(refreshRoutesStep(env, Date.now()));
-  },
-
-  async fetch(request, env, ctx) {
+  async fetch(request, env) {
     const url = new URL(request.url);
     const now = Date.now();
 
@@ -1141,7 +1077,6 @@ export default {
       .sort((a, b) => a.d - b.d)
       .slice(0, NEAREST_STOPS);
 
-    const routesPromise = getRoutesByStop(env);
     const arrivals = await Promise.all(
       nearest.map((s) =>
         fetch(`https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival?BusStopCode=${s.BusStopCode}`, {
@@ -1152,9 +1087,7 @@ export default {
       )
     );
 
-    const routes = await routesPromise;
-    ctx?.waitUntil(refreshRoutesStep(env, now, routes));
-    const stops = nearest.map((stop, i) => toStopModel(stop, arrivals[i], now, routes?.byStop[stop.BusStopCode]));
+    const stops = nearest.map((stop, i) => toStopModel(stop, arrivals[i], now));
     const pass = access.pass;
     const warning = expiryWarning(pass, now);
 

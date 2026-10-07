@@ -18,7 +18,7 @@ const now = Date.now();
 const ARR = {
   28091: [['154', [[3, 'SEA'], [21, 'SEA'], [21, 'SEA', 0]]], ['180', [[0, 'LSD'], [12, 'SDA'], [14, 'SEA']]], ['187', [[1, 'SDA'], [9, 'SEA'], [20, 'SEA']]],
           ['240', [[3, 'SEA'], [8, 'SEA'], [15, 'SEA']]], ['246', [[6, 'SEA'], [25, 'SEA'], [32, 'SEA', 0]]], ['49', [[8, 'SEA'], [26, 'SEA'], [38, 'SDA', 0]]],
-          ['98', [[10, 'SDA'], [18, 'SEA'], [25, 'SEA']]], ['98M', [[36, 'SEA', 0]]]],
+          ['98', [[10, 'SDA'], [18, 'SEA'], [25, 'SEA']]], ['98M', [[36, 'SEA', 0]]], ['99', []]],
   28099: [['154', [[1, 'SEA'], [7, 'SEA'], [14, 'SEA']]], ['180', [[0, 'SDA'], [5, 'SEA'], [6, 'SEA']]], ['187', [[3, 'SEA'], [12, 'SEA'], [21, 'SEA']]],
           ['240', [[3, 'SDA'], [10, 'SEA'], [25, 'SEA', 0]]], ['246', [[1, 'SEA'], [12, 'SEA'], [22, 'SEA']]], ['49', [[6, 'SEA'], [20, 'SEA'], [25, 'SEA']]],
           ['98', [[3, 'LSD'], [9, 'SDA'], [15, 'SEA']]]],
@@ -48,6 +48,7 @@ assert.equal((await call(`token=secret`)).status, 400);
 const text = await (await call(base)).text();
 assert.match(text, /^🚏 Lakeside Stn · 28091 · 90m\n49   🟢8 · 🟢26 · 🟡38 min\n98   🟡10/);
 assert.match(text, /180   🔴Now · 🟡12 · 🟢14 min/);
+assert.match(text, /\n99   N\/A\n/, 'service listed by LTA without arrival times');
 assert.ok(!text.includes('28389') && !text.includes('Far Away'), 'only the nearest 3 stops');
 
 const json = await (await call(base + '&format=json')).json();
@@ -58,3 +59,4 @@ const htmlRes = await call(base + '&format=html');
 assert.equal(htmlRes.headers.get('content-type'), 'text/html; charset=utf-8');
 const html = await htmlRes.text();
 assert.ok(html.includes('Blk 515 &amp; 516') && !html.includes('515 & 516'));
+assert.match(html, /<span class="svc">99<\/span><span class="t next">N\/A<\/span>/);

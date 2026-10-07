@@ -102,11 +102,6 @@ nothing breaks if you skip this step.
 Only a complete stop list is cached: LTA pages are fetched at most 4 at a time and retried, and if
 one still fails the list serves that request but isn't stored.
 
-With KV bound, the Worker also builds a **routes table** — which services call at each stop — from
-LTA's BusRoutes (~53 pages). It's built in the background, 12 pages at a time, at most once a minute,
-by the cron trigger in `wrangler.toml` and by requests that find it missing or over a week old. Once
-it exists, each stop also lists services that call there but have no bus running right now (LTA's
-arrival data simply leaves those out), e.g. `Not running now: 14, 97`.
 
 ## Selling access
 
