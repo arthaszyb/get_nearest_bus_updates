@@ -1,6 +1,8 @@
-name = "sg-bus-nearest"
+name = "busnearby"
 main = "worker/bus-nearest-worker.js"
-compatibility_date = "2024-01-01"
+compatibility_date = "2026-07-27"
+# Keep variables set in the dashboard (Payment Links etc.) when deploying from the CLI.
+keep_vars = true
 
 # If you already deployed this Worker via the Cloudflare dashboard and want to
 # manage it from the CLI instead, set `name` above to match your existing
@@ -9,11 +11,33 @@ compatibility_date = "2024-01-01"
 # Optional but recommended: KV cache for the bus stop list (see README > Caching).
 # Create the namespace first (`wrangler kv namespace create BUS_STOPS_KV`),
 # then uncomment and fill in the id it gives you.
-# [[kv_namespaces]]
-# binding = "BUS_STOPS_KV"
-# id = "your-kv-namespace-id"
+[[kv_namespaces]]
+binding = "BUS_STOPS_KV"
+id = "1e890045942342a99224be6b1644ac72" # bus_station_caches
 
-# Secrets (LTA_API_KEY, ACCESS_TOKEN) are NOT set here — never commit secrets
-# to wrangler.toml. Set them with:
+# Optional: D1 database for selling per-customer access tokens (see README > Selling access).
+# Create it with `wrangler d1 create sg-bus-nearest --location apac`, uncomment and fill in
+# the id it gives you, then `wrangler d1 migrations apply sg-bus-nearest --remote`.
+[[d1_databases]]
+binding = "DB"
+database_name = "bus-pro-db-001"
+database_id = "b1be8347-56ea-4246-814d-3cc3aa5e645e"
+
+# Optional: link shown to customers whose pass has expired or is about to, and the
+# iCloud link of the shared Shortcut, shown on the post-payment welcome page.
+# [vars]
+# RENEW_URL = "https://your-payment-link"
+# SHORTCUT_URL = "https://www.icloud.com/shortcuts/..."
+# PAYMENT_LINK_MONTHLY = "https://buy.stripe.com/..."
+# PAYMENT_LINK_YEARLY = "https://buy.stripe.com/..."
+# PAYMENT_LINK_MONTHLY_PROMO = "https://buy.stripe.com/..."
+# PAYMENT_LINK_YEARLY_PROMO = "https://buy.stripe.com/..."
+# MANAGE_URL = "https://billing.stripe.com/p/login/..."
+# SUPPORT_EMAIL = "hello@your-domain"
+
+# Secrets (LTA_API_KEY, ACCESS_TOKEN, ADMIN_SECRET, STRIPE_WEBHOOK_SECRET) are NOT set
+# here — never commit secrets to wrangler.toml. Set them with:
 #   wrangler secret put LTA_API_KEY
 #   wrangler secret put ACCESS_TOKEN
+#   wrangler secret put ADMIN_SECRET
+#   wrangler secret put STRIPE_WEBHOOK_SECRET

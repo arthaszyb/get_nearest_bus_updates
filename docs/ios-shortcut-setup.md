@@ -29,6 +29,34 @@ have its URL, e.g. `https://your-worker.your-subdomain.workers.dev`.
 6. Tap the ▶️ play button to test. It should immediately show arrival times for the nearest stops
    — no stop-picking list, no confirmation dialog.
 
+## Styled view (recommended)
+
+The steps above show the plain-text version in iOS's built-in result sheet. For the styled page
+(stop cards, colour-coded crowding, dark mode, auto-refresh every 30s):
+
+1. In step 3, add `&format=html` to the end of the URL
+2. Delete **Get Contents of URL** and **Show Result**, and add **Show Web Page** in their place —
+   it opens the URL from step 3 in an in-app Safari sheet
+
+Don't use **Quick Look** for this — it doesn't reliably render HTML pages.
+
+## Sharing the Shortcut with customers
+
+If you sell access with per-customer tokens (see the main README), share one Shortcut and have
+iOS ask each person for their own token when they add it:
+
+1. Add a **Text** action at the very top of the Shortcut containing just the token. In the **URL**
+   action, delete the token after `&token=` and insert the Text action's output there instead.
+2. Open the Shortcut's details (ⓘ) → **Setup** → **Add Question**, pick the Text action, and set
+   the prompt to something like "Paste your access token".
+3. **Clear your own token out of the Text action** (leave a placeholder like `paste-token-here`) —
+   whatever is in it when you share becomes the default answer everyone sees.
+4. Share → **Copy iCloud Link**, and send that link along with each customer's token. If you sell
+   through Stripe, set it as the Worker's `SHORTCUT_URL` and the welcome page hands it out for you.
+
+Renewing a customer (`extend`) keeps their token, so they never need to touch the Shortcut again.
+Only `rotate` gives them a new token to paste in.
+
 ## Troubleshooting
 
 - **"No valid file provider found" / prompted for Face ID**: this means whichever Shortcut you're
