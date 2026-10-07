@@ -644,7 +644,7 @@ function renderBusCell(bus, isNext) {
   return `<span class="${cls}">${dot}${time}</span>`;
 }
 
-function htmlPage(content, { refresh, title = 'Nearby buses' } = {}) {
+function htmlPage(content, { refresh, title = 'Nearby buses', bodyClass, css = '' } = {}) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -717,43 +717,11 @@ ${refresh ? `<meta http-equiv="refresh" content="${refresh}">\n` : ''}<title>${e
     background: var(--accent); color: #fff; text-align: center; text-decoration: none; cursor: pointer;
   }
   .btn.secondary { background: var(--card); color: var(--accent); box-shadow: inset 0 0 0 1.5px var(--accent); }
-  .site { max-width: 760px; margin: 0 auto; }
-  .site > section { margin: 0 0 40px; }
-  .site > section > h2 { font-size: 24px; margin: 0 0 14px; }
-  .site p { line-height: 1.5; }
-  .brand { font-weight: 800; font-size: 17px; margin: 4px 4px 28px; }
-  .brand span { color: var(--accent); }
-  .hero h1 { font-size: 36px; line-height: 1.1; letter-spacing: -0.02em; margin: 0 0 14px; }
-  .hero .lead { font-size: 18px; color: var(--muted); margin: 0 0 20px; }
-  .hero .btn { max-width: 280px; }
-  .demo { max-width: 440px; }
-  .caption { text-align: center; color: var(--muted); font-size: 13px; margin: -4px 0 0; }
-  .steps { padding-left: 22px; line-height: 1.6; margin: 0; }
-  .steps li { margin-bottom: 8px; }
-  .features { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
-  .features .card { padding: 16px; margin: 0; }
-  .features h3 { font-size: 16px; margin: 6px 0 4px; }
-  .features p { margin: 0; color: var(--muted); font-size: 15px; }
-  .promo { background: var(--accent); color: #fff; border-radius: 12px; padding: 10px 14px; margin-bottom: 14px; font-size: 15px; }
-  .plans { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
-  .plan { padding: 18px 16px; margin: 0; display: flex; flex-direction: column; gap: 6px; }
-  .plan.best { box-shadow: inset 0 0 0 2px var(--accent); }
-  .plan h3 { font-size: 17px; margin: 0; }
-  .plan .price { font-size: 34px; font-weight: 800; letter-spacing: -0.02em; }
-  .plan .price small { font-size: 15px; font-weight: 500; color: var(--muted); }
-  .plan .was { color: var(--muted); text-decoration: line-through; font-size: 15px; min-height: 20px; }
-  .plan ul { margin: 4px 0 12px; padding-left: 18px; color: var(--muted); font-size: 15px; line-height: 1.5; flex: 1; }
-  .plan form { margin: 0; }
-  .tag { vertical-align: 2px; margin-left: 6px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 99px; }
-  .site-footer { display: block; margin: 0; border-top: 1px solid var(--line); padding-top: 16px; color: var(--muted); font-size: 13px; line-height: 1.6; }
-  .site-footer nav { display: flex; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 8px; }
-  .legal h2 { font-size: 19px; margin: 24px 0 8px; }
-  .legal p, .legal li { line-height: 1.55; }
   footer { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--muted); font-size: 12px; margin: 4px 4px 0; }
   footer span { display: inline-flex; align-items: center; gap: 5px; }
-</style>
+${css}</style>
 </head>
-<body>
+<body${bodyClass ? ` class="${bodyClass}"` : ''}>
 ${content}
 </body>
 </html>`;
@@ -828,25 +796,138 @@ function renderError({ status, message, renew }, format, renewUrl) {
 
 const money = (amount) => `${CURRENCY}${amount.toFixed(2)}`;
 const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
-const sitePage = (content, title, status = 200) =>
-  new Response(htmlPage(`<div class="site">\n${content}\n</div>`, { title }), { status, headers: HTML_HEADERS });
-const brand = `<div class="brand"><a href="/" style="color:inherit;text-decoration:none">${PRODUCT_NAME.replace(/^([A-Z][a-z]+)(.+)$/, '$1<span>$2</span>')}</a></div>`;
+
+// Website look: Apple-style — solid deep-blue and light-grey sections, frosted-glass nav and cards,
+// big tight headlines, pill buttons. Only website pages get this; the arrivals page keeps its app look.
+const SITE_CSS = `
+  body.site-page { padding: 0; background: var(--s-light); color: var(--s-ink); font-size: 17px; line-height: 1.47; }
+  .site-page {
+    --s-navy: #0b1d3f; --s-navy-2: #10295a; --s-light: #f5f5f7; --s-white: #fff; --s-ink: #1d1d1f; --s-sub: #6e6e73;
+    --s-blue: #0071e3; --s-blue-on-dark: #2997ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    .site-page { --s-light: #000; --s-white: #161617; --s-ink: #f5f5f7; --s-sub: #a1a1a6; }
+  }
+  .site-page a { color: var(--s-blue); }
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 22px; }
+  .glass {
+    background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.16);
+    -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
+  }
+  .nav {
+    position: sticky; top: 0; z-index: 10; background: rgba(11,29,63,.72); border-bottom: 1px solid rgba(255,255,255,.08);
+    -webkit-backdrop-filter: saturate(180%) blur(20px); backdrop-filter: saturate(180%) blur(20px);
+  }
+  .nav .wrap { display: flex; align-items: center; gap: 22px; height: 52px; }
+  .nav .logo { color: #fff; font-weight: 700; font-size: 19px; letter-spacing: -.01em; text-decoration: none; margin-right: auto; }
+  .nav .logo span { color: var(--s-blue-on-dark); }
+  .nav a.link { color: rgba(255,255,255,.8); font-size: 13px; text-decoration: none; }
+  .nav a.link:hover { color: #fff; }
+  @media (max-width: 520px) { .nav a.link.optional { display: none; } }
+  .pill {
+    display: inline-block; white-space: nowrap; border-radius: 980px; padding: 11px 22px; font-size: 17px; font-weight: 500; line-height: 1.2;
+    background: var(--s-blue); color: #fff !important; text-decoration: none; border: 0; cursor: pointer; font-family: inherit;
+  }
+  .pill:hover { filter: brightness(1.08); }
+  .pill.small { padding: 6px 14px; font-size: 13px; }
+  .pill.ghost { background: transparent; color: var(--s-blue-on-dark) !important; box-shadow: inset 0 0 0 1.5px var(--s-blue-on-dark); }
+  .pill[disabled] { opacity: .45; cursor: default; }
+  .dark { background: var(--s-navy); color: #f5f5f7; }
+  .dark a { color: var(--s-blue-on-dark); }
+  .band { padding: 96px 0; }
+  .eyebrow { font-size: 19px; font-weight: 600; color: var(--s-blue-on-dark); margin: 0 0 10px; }
+  .headline { font-size: clamp(44px, 8vw, 88px); line-height: 1.04; letter-spacing: -.035em; font-weight: 700; margin: 0 0 22px; }
+  .title { font-size: clamp(36px, 5.5vw, 56px); line-height: 1.07; letter-spacing: -.028em; font-weight: 700; margin: 0 0 14px; }
+  .lede { font-size: clamp(19px, 2.4vw, 24px); line-height: 1.38; color: rgba(245,245,247,.72); max-width: 640px; margin: 0 0 32px; }
+  .light .lede { color: var(--s-sub); }
+  .center { text-align: center; }
+  .center .lede, .lede.center { margin-left: auto; margin-right: auto; }
+  .ctas { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+  .hero { padding: 88px 0 96px; }
+  .phone {
+    width: min(360px, 88vw); margin: 64px auto 0; border-radius: 48px; padding: 14px;
+    background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.22);
+    -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); box-shadow: 0 40px 100px rgba(0,0,0,.45);
+  }
+  .screen { background: #f2f2f7; color: #1c1c1e; border-radius: 36px; padding: 18px 12px 12px; text-align: left; font-size: 16px; line-height: 1.3; }
+  .screen .card { background: #fff; }
+  .screen .stop h2 { color: #1c1c1e; }
+  .screen .t.next { color: #1c1c1e; }
+  .screen-title { font-size: 26px; font-weight: 700; margin: 4px 6px 12px; }
+  .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+  .tile { background: var(--s-white); border-radius: 22px; padding: 30px 26px; box-shadow: 0 2px 20px rgba(0,0,0,.04); }
+  .tile .icon { font-size: 34px; line-height: 1; margin-bottom: 18px; }
+  .tile h3 { font-size: 21px; letter-spacing: -.01em; margin: 0 0 8px; }
+  .tile p { margin: 0; color: var(--s-sub); }
+  .steps3 { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); counter-reset: step; }
+  .steps3 > div { background: var(--s-white); border-radius: 22px; padding: 30px 26px; }
+  .steps3 > div::before {
+    counter-increment: step; content: counter(step); display: block; font-size: 48px; font-weight: 700;
+    letter-spacing: -.03em; color: var(--s-blue); margin-bottom: 8px;
+  }
+  .steps3 h3 { font-size: 21px; margin: 0 0 6px; }
+  .steps3 p { margin: 0; color: var(--s-sub); }
+  .offer { display: inline-block; border-radius: 980px; padding: 8px 18px; font-size: 15px; margin: 0 0 36px; color: #f5f5f7; }
+  .plans { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); text-align: left; }
+  .plan { border-radius: 26px; padding: 30px 26px; display: flex; flex-direction: column; gap: 4px; color: #f5f5f7; }
+  .plan.best { background: rgba(41,151,255,.14); border-color: rgba(41,151,255,.6); }
+  .plan h3 { font-size: 21px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+  .plan .tag { background: var(--s-blue-on-dark); color: #00122e; font-size: 12px; font-weight: 700; padding: 3px 9px; border-radius: 980px; }
+  .plan .was { color: rgba(245,245,247,.5); text-decoration: line-through; font-size: 17px; min-height: 24px; }
+  .plan .price { font-size: 48px; font-weight: 700; letter-spacing: -.03em; line-height: 1.05; }
+  .plan .price small { font-size: 17px; font-weight: 500; color: rgba(245,245,247,.6); letter-spacing: 0; }
+  .plan ul { list-style: none; padding: 0; margin: 18px 0 24px; flex: 1; color: rgba(245,245,247,.78); }
+  .plan li { padding: 7px 0; border-top: 1px solid rgba(255,255,255,.1); }
+  .plan li::before { content: "✓"; color: var(--s-blue-on-dark); margin-right: 10px; font-weight: 700; }
+  .plan .pill { text-align: center; }
+  .plan .note { font-size: 13px; color: rgba(245,245,247,.55); margin: 12px 0 0; }
+  .fine { font-size: 13px; color: rgba(245,245,247,.55); margin: 28px 0 0; }
+  .doc { max-width: 720px; margin: 0 auto; padding: 56px 22px 72px; }
+  .doc .title { margin-bottom: 18px; }
+  .doc h2 { font-size: 24px; letter-spacing: -.015em; margin: 36px 0 10px; }
+  .doc .panel { background: var(--s-white); border-radius: 22px; padding: 26px; margin: 24px 0; }
+  .doc ul { padding-left: 22px; }
+  .doc li { margin: 6px 0; }
+  .site-page .site-footer { background: var(--s-light); border-top: 1px solid rgba(128,128,128,.2); color: var(--s-sub); font-size: 12px; line-height: 1.6; padding: 22px 0 40px; margin: 0; display: block; }
+  .site-page .site-footer nav { display: flex; flex-wrap: wrap; gap: 4px 20px; margin-bottom: 10px; }
+  .site-page .site-footer a { color: var(--s-ink); text-decoration: none; }
+`;
+
+const navBar = (env) => `<nav class="nav"><div class="wrap">
+  <a class="logo" href="/">${PRODUCT_NAME.replace(/^([A-Z][a-z]+)(.+)$/, '$1<span>$2</span>')}</a>
+  <a class="link optional" href="/#features">Features</a>
+  <a class="link" href="/#pricing">Pricing</a>
+  <a class="link optional" href="/install">Install</a>
+  <a class="pill small" href="${escapeHtml(env.SHORTCUT_URL || '/install')}">Try it free</a>
+</div></nav>`;
+
+// A website page: glass nav, the content, footer. `bare` content brings its own full-width sections;
+// otherwise it's set as a document on the light background.
+const sitePage = (env, now, content, title, { status = 200, bare = false } = {}) =>
+  new Response(
+    htmlPage(`${navBar(env)}\n${bare ? content : `<main class="doc">\n${content}\n</main>`}\n${siteFooter(env, now)}`, {
+      title,
+      bodyClass: 'site-page',
+      css: SITE_CSS,
+    }),
+    { status, headers: HTML_HEADERS }
+  );
 
 function siteFooter(env, now) {
   const links = [
     env.MANAGE_URL && `<a href="${escapeHtml(env.MANAGE_URL)}">Manage subscription</a>`,
-    '<a href="/privacy">Privacy</a>',
     '<a href="/install">Install guide</a>',
+    '<a href="/privacy">Privacy</a>',
     '<a href="/terms">Terms</a>',
     env.SUPPORT_EMAIL && `<a href="mailto:${escapeHtml(env.SUPPORT_EMAIL)}">Contact</a>`,
   ].filter(Boolean);
   // The Singapore Open Data Licence asks for this notice wherever LTA data is used.
-  return `<footer class="site-footer">
+  return `<footer class="site-footer"><div class="wrap">
   <nav>${links.join('')}</nav>
   Contains information from LTA DataMall accessed on ${formatDate(now)} from the Land Transport Authority, which is made
   available under the terms of the <a href="https://data.gov.sg/open-data-licence">Singapore Open Data Licence version 1.0</a>.
   Not affiliated with LTA.
-</footer>`;
+</div></footer>`;
 }
 
 // The page that hands a customer their token, after paying or signing up for a free pass.
@@ -903,9 +984,13 @@ async function handleFreeSignup(request, env, now) {
   const { n } = await env.DB.prepare('SELECT COUNT(*) AS n FROM tokens WHERE signup_key = ?1').bind(signupKey).first();
   if (n >= FREE_SIGNUPS_PER_NETWORK_PER_DAY) {
     return sitePage(
-      `${brand}<div class="card notice">Too many free passes have been created from this network today. Please try again tomorrow, or <a href="/#pricing">pick a plan</a>.</div>`,
+      env,
+      now,
+      `<h1 class="title">You don't need a pass.</h1>
+<p>Free is built in: add the Shortcut and you get ${ANONYMOUS_DAILY_LIMIT} checks a day, no token required.</p>
+<p><a class="pill" href="${escapeHtml(env.SHORTCUT_URL || '/install')}">Add ${PRODUCT_NAME} to iPhone</a></p>`,
       PRODUCT_NAME,
-      429
+      { status: 429 }
     );
   }
   const token = newToken();
@@ -940,89 +1025,102 @@ function renderLanding(env, now) {
   const promo = now <= PROMO_ENDS_AT;
   const monthly = PAID_PLANS.find((p) => p.plan === 'monthly');
   const priceOf = (p) => (promo ? p.promoPrice : p.price);
+  const install = escapeHtml(env.SHORTCUT_URL || '/install');
 
   const paidCards = PAID_PLANS.map((p) => {
     const link = (promo && env[`${p.link}_PROMO`]) || env[p.link];
     const savings = p.per === 'year' && monthly ? Math.round((1 - priceOf(p) / (priceOf(monthly) * 12)) * 100) : 0;
-    return `<div class="card plan${p.per === 'year' ? ' best' : ''}">
+    return `<div class="plan glass${p.per === 'year' ? ' best' : ''}">
   <h3>${escapeHtml(p.label)}${savings > 0 ? ` <span class="tag">Save ${savings}%</span>` : ''}</h3>
   <div class="was">${promo ? money(p.price) : ''}</div>
   <div class="price">${money(priceOf(p))} <small>/ ${p.per}</small></div>
   <ul><li>Up to ${PLANS[p.plan].dailyLimit} checks a day</li><li>Live arrivals and crowding</li><li>Cancel any time</li></ul>
-  ${link ? `<a class="btn" href="${escapeHtml(link)}">Subscribe</a>` : '<button type="button" disabled style="opacity:.5">Coming soon</button>'}
+  ${link ? `<a class="pill" href="${escapeHtml(link)}">Subscribe</a>` : '<button class="pill" type="button" disabled>Coming soon</button>'}
 </div>`;
   }).join('\n');
 
-  const promoBanner = promo
-    ? `<div class="promo"><b>Launch offer</b> — subscribe by ${formatDate(PROMO_ENDS_AT)} and keep the launch price for as long as you stay subscribed.</div>`
+  const offer = promo
+    ? `<div class="offer glass"><b>Launch offer</b> — subscribe by ${formatDate(PROMO_ENDS_AT)} and keep the launch price for as long as you stay subscribed.</div>`
     : '';
 
   return sitePage(
-    `${brand}
-<section class="hero">
-  <h1>Which bus is coming?<br>One tap.</h1>
-  <p class="lead">${PRODUCT_NAME} finds the bus stops nearest you — both sides of the road — and shows live arrival times and how full each bus is. No app to install, no stop codes to look up.</p>
-  <a class="btn" href="${escapeHtml(env.SHORTCUT_URL || '#pricing')}">Try it free</a>
-</section>
-
-<section class="demo" aria-label="Example">
-  ${SAMPLE_STOPS.map(renderStopCard).join('\n')}
-  <p class="caption">What you see when you tap it (example)</p>
-</section>
-
-<section>
-  <h2>How it works</h2>
-  <ol class="steps">
-    <li><b>Add the Shortcut</b> to your iPhone. That's all the setup there is.</li>
-    <li><b>Tap it</b> from your Home Screen, a widget, Siri or the Action button. ${ANONYMOUS_DAILY_LIMIT} checks a day are free, no sign-up.</li>
-    <li><b>Need more?</b> Subscribe below and paste your token into the Shortcut.</li>
-  </ol>
-</section>
-
-<section>
-  <h2>Why it's quicker</h2>
-  <div class="features">
-    <div class="card"><div>📍</div><h3>Both sides of the road</h3><p>The four closest stops, so the stop across the street is covered too.</p></div>
-    <div class="card"><div>🟢</div><h3>Know if there's a seat</h3><p>Every bus shows whether it has seats, standing room or is packed.</p></div>
-    <div class="card"><div>⚡</div><h3>Nothing to search</h3><p>It works out where you are. No stop codes, no maps, no menus.</p></div>
-    <div class="card"><div>🔒</div><h3>No account, no tracking</h3><p>Your location is used for the lookup and never stored.</p></div>
-  </div>
-</section>
-
-<section id="pricing">
-  <h2>Pricing</h2>
-  ${promoBanner}
-  <div class="plans">
-    <div class="card plan">
-      <h3>Free</h3>
-      <div class="was"></div>
-      <div class="price">${CURRENCY}0</div>
-      <ul><li>${ANONYMOUS_DAILY_LIMIT} checks a day</li><li>Built in — no sign-up, no token</li><li>Just add the Shortcut and tap</li></ul>
-      ${env.SHORTCUT_URL
-        ? `<a class="btn secondary" href="${escapeHtml(env.SHORTCUT_URL)}">Get free pass</a>`
-        : '<form method="post" action="/free"><button type="submit" class="btn secondary">Get free pass</button></form>'}
-      <p class="muted small" style="margin:0">Free is on by default — you don't need a pass to use it.</p>
+    env,
+    now,
+    `<section class="dark hero center">
+  <div class="wrap">
+    <p class="eyebrow">Live bus arrivals · Singapore</p>
+    <h1 class="headline">Which bus is coming?<br>One tap.</h1>
+    <p class="lede">${PRODUCT_NAME} finds the stops nearest you — both sides of the road — and shows live arrival times and how full each bus is. No app. No stop codes.</p>
+    <div class="ctas"><a class="pill" href="${install}">Try it free</a><a class="pill ghost" href="#pricing">See pricing</a></div>
+    <div class="phone" aria-label="Example of what you see">
+      <div class="screen">
+        <div class="screen-title">Nearby buses</div>
+        ${SAMPLE_STOPS.map(renderStopCard).join('\n')}
+      </div>
     </div>
-    ${paidCards}
   </div>
-  <p class="muted small">Prices in SGD. Subscriptions renew automatically until cancelled. iPhone only for now — it runs as an Apple Shortcut.</p>
 </section>
 
-${siteFooter(env, now)}`,
-    `${PRODUCT_NAME} — live bus arrivals near you, in one tap`
+<section class="light band" id="features">
+  <div class="wrap">
+    <h2 class="title center">Built for the bus stop.</h2>
+    <p class="lede center light">Everything you need in the ten seconds before you decide to run.</p>
+    <div class="grid">
+      <div class="tile"><div class="icon">📍</div><h3>Both sides of the road</h3><p>The three closest stops, so the one across the street is covered too.</p></div>
+      <div class="tile"><div class="icon">🟢</div><h3>Know if there's a seat</h3><p>Every bus shows whether it has seats, standing room, or is packed.</p></div>
+      <div class="tile"><div class="icon">⚡</div><h3>Nothing to search</h3><p>It works out where you are. No stop codes, no maps, no menus.</p></div>
+      <div class="tile"><div class="icon">🔒</div><h3>No account, no tracking</h3><p>Your location is used for the lookup and never stored.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="light band" style="padding-top:0">
+  <div class="wrap">
+    <h2 class="title center">Ready in a minute.</h2>
+    <p class="lede center light">No sign-up. No app store. It's a Shortcut.</p>
+    <div class="steps3">
+      <div><h3>Add the Shortcut</h3><p>Tap <a href="${install}">Try it free</a> on your iPhone, then Add Shortcut. That's the whole setup.</p></div>
+      <div><h3>Tap it</h3><p>From your Home Screen, a widget, Siri or the Action button. ${ANONYMOUS_DAILY_LIMIT} checks a day are free.</p></div>
+      <div><h3>Need more?</h3><p>Subscribe below and paste your token into the Shortcut. Done.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="dark band center" id="pricing">
+  <div class="wrap">
+    <h2 class="title">Simple pricing.</h2>
+    <p class="lede">Free every day. Upgrade when four checks aren't enough.</p>
+    ${offer}
+    <div class="plans">
+      <div class="plan glass">
+        <h3>Free</h3>
+        <div class="was"></div>
+        <div class="price">${CURRENCY}0</div>
+        <ul><li>${ANONYMOUS_DAILY_LIMIT} checks a day</li><li>Built in — no sign-up, no token</li><li>Just add the Shortcut and tap</li></ul>
+        <a class="pill ghost" href="${install}">Get free pass</a>
+        <p class="note">Free is on by default — you don't need a pass to use it.</p>
+      </div>
+      ${paidCards}
+    </div>
+    <p class="fine">Prices in SGD. Subscriptions renew automatically until cancelled. iPhone only for now — it runs as an Apple Shortcut.</p>
+  </div>
+</section>`,
+    `${PRODUCT_NAME} — live bus arrivals near you, in one tap`,
+    { bare: true }
   );
 }
 
 function renderInstall(env, now) {
   const add = env.SHORTCUT_URL
-    ? `<a class="btn" href="${escapeHtml(env.SHORTCUT_URL)}">Add ${PRODUCT_NAME} to iPhone</a>`
-    : '<button type="button" disabled style="opacity:.5">Coming soon</button>';
+    ? `<a class="pill" href="${escapeHtml(env.SHORTCUT_URL)}">Add ${PRODUCT_NAME} to iPhone</a>`
+    : '<button class="pill" type="button" disabled>Coming soon</button>';
   return sitePage(
-    `${brand}
-<article class="legal">
-  <h1>Install ${PRODUCT_NAME}</h1>
+    env,
+    now,
+    `<article class="legal">
+  <h1 class="title">Install ${PRODUCT_NAME}</h1>
   <p>${PRODUCT_NAME} runs as an Apple Shortcut on your iPhone. Setup takes under a minute and needs no account.</p>
-  <div style="max-width:320px;margin:20px 0">${add}</div>
+  <p style="margin:24px 0 8px">${add}</p>
 
   <h2>1. Add the Shortcut</h2>
   <p>On your iPhone, tap the button above. The Shortcuts app opens; tap <b>Add Shortcut</b>.</p>
@@ -1051,8 +1149,7 @@ function renderInstall(env, now) {
     <li><b>"Invalid access token"</b> — re-add the Shortcut from the button above and paste the token again, or leave it empty for the free plan.</li>
     <li><b>The link opens a web page instead of the Shortcuts app</b> — open it on your iPhone, in Safari.</li>
   </ul>
-</article>
-${siteFooter(env, now)}`,
+</article>`,
     `Install — ${PRODUCT_NAME}`
   );
 }
@@ -1060,9 +1157,10 @@ ${siteFooter(env, now)}`,
 function renderPrivacy(env, now) {
   const contact = env.SUPPORT_EMAIL ? `<a href="mailto:${escapeHtml(env.SUPPORT_EMAIL)}">${escapeHtml(env.SUPPORT_EMAIL)}</a>` : 'us';
   return sitePage(
-    `${brand}
-<article class="legal">
-  <h1>Privacy policy</h1>
+    env,
+    now,
+    `<article class="legal">
+  <h1 class="title">Privacy policy</h1>
   <p class="muted">Last updated ${LEGAL_UPDATED}</p>
   <p>${PRODUCT_NAME} shows live bus arrivals near you. We collect as little as we can to do that, and we don't sell or share your data for advertising.</p>
 
@@ -1088,8 +1186,7 @@ function renderPrivacy(env, now) {
 
   <h2>Your rights</h2>
   <p>Under Singapore's Personal Data Protection Act you can ask to see, correct or delete the personal data we hold about you, or withdraw your consent. Contact ${contact}.</p>
-</article>
-${siteFooter(env, now)}`,
+</article>`,
     `Privacy — ${PRODUCT_NAME}`
   );
 }
@@ -1097,9 +1194,10 @@ ${siteFooter(env, now)}`,
 function renderTerms(env, now) {
   const contact = env.SUPPORT_EMAIL ? `<a href="mailto:${escapeHtml(env.SUPPORT_EMAIL)}">${escapeHtml(env.SUPPORT_EMAIL)}</a>` : 'us';
   return sitePage(
-    `${brand}
-<article class="legal">
-  <h1>Terms of use</h1>
+    env,
+    now,
+    `<article class="legal">
+  <h1 class="title">Terms of use</h1>
   <p class="muted">Last updated ${LEGAL_UPDATED}</p>
 
   <h2>The service</h2>
@@ -1125,8 +1223,7 @@ function renderTerms(env, now) {
 
   <h2>Contact and law</h2>
   <p>Questions: ${contact}. These terms are governed by the laws of Singapore.</p>
-</article>
-${siteFooter(env, now)}`,
+</article>`,
     `Terms — ${PRODUCT_NAME}`
   );
 }

@@ -34,10 +34,11 @@ assert.match(html, /<div class="was">S\$29\.90<\/div>\s*<div class="price">S\$18
 assert.match(html, /Save 17%/); // 18.90 vs 12 × 1.90
 assert.match(html, /href="https:\/\/buy\.stripe\.com\/monthly-launch">Subscribe/);
 assert.match(html, /href="https:\/\/buy\.stripe\.com\/yearly-launch">Subscribe/);
-assert.match(html, /<a class="btn secondary" href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Get free pass<\/a>/, 'Get free pass installs the Shortcut');
+assert.match(html, /<a class="pill ghost" href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Get free pass<\/a>/, 'Get free pass installs the Shortcut');
 assert.match(html, /4 checks a day<\/li><li>Built in — no sign-up, no token/);
 assert.match(html, /Free is on by default — you don't need a pass to use it\./);
-assert.match(html, /<a class="btn" href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Try it free/);
+assert.match(html, /<a class="pill" href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Try it free/);
+assert.match(html, /<nav class="nav">/);
 assert.match(html, /href="https:\/\/billing\.stripe\.com\/p\/login\/abc">Manage subscription/);
 assert.match(html, /Contains information from LTA DataMall accessed on 7 Oct 2026/);
 assert.match(html, /class="row"><span class="svc">49<\/span>/, 'demo cards rendered');
@@ -59,7 +60,8 @@ html = await (await get('/', { ...env, PAYMENT_LINK_MONTHLY_PROMO: undefined }))
 assert.match(html, /href="https:\/\/buy\.stripe\.com\/monthly">Subscribe/);
 html = await (await get('/', { BUS_STOPS_KV, DB })).text();
 assert.equal((html.match(/Coming soon/g) || []).length, 2);
-assert.match(html, /<form method="post" action="\/free">/, 'without a Shortcut link, Get free pass issues a token');
+assert.match(html, /<a class="pill ghost" href="\/install">Get free pass<\/a>/, 'without a Shortcut link, Get free pass goes to the install guide');
+assert.ok(!html.includes('action="/free"'), 'no token sign-up form: free is built in');
 assert.ok(!html.includes('Manage subscription') && !html.includes('mailto:'));
 
 // API behaviour at / is unchanged
@@ -78,7 +80,7 @@ for (const path of ['/privacy', '/terms', '/install']) {
 }
 assert.match(await (await get('/privacy')).text(), /Personal Data Protection Act/);
 html = await (await get('/install')).text();
-assert.match(html, /<a class="btn" href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Add BusNearby to iPhone<\/a>/);
+assert.match(html, /<a class="pill" href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Add BusNearby to iPhone<\/a>/);
 assert.match(html, /Leave it empty to use the free plan<\/b> — 4 checks a day/);
 
 // --- Free pass ---
@@ -109,7 +111,7 @@ assert.equal((await signup()).status, 200);
 assert.equal((await signup()).status, 200);
 res = await signup();
 assert.equal(res.status, 429);
-assert.match(await res.text(), /Too many free passes/);
+assert.match(await res.text(), /You don't need a pass\.<\/h1>[\s\S]*4 checks a day, no token required/);
 assert.equal((await signup('198.51.100.1')).status, 200, 'other networks unaffected');
 clock += DAY;
 assert.equal((await signup()).status, 200, 'cap resets the next day');
