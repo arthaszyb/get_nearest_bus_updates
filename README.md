@@ -99,6 +99,15 @@ Cached data expires automatically after 7 days. To force a refresh sooner, call 
 This binding is optional — the Worker falls back to a live fetch every request if it's absent, so
 nothing breaks if you skip this step.
 
+Only a complete stop list is cached: LTA pages are fetched at most 4 at a time and retried, and if
+one still fails the list serves that request but isn't stored.
+
+With KV bound, the Worker also builds a **routes table** — which services call at each stop — from
+LTA's BusRoutes (~53 pages). It's built in the background, 12 pages at a time, at most once a minute,
+by the cron trigger in `wrangler.toml` and by requests that find it missing or over a week old. Once
+it exists, each stop also lists services that call there but have no bus running right now (LTA's
+arrival data simply leaves those out), e.g. `Not running now: 14, 97`.
+
 ## Selling access
 
 `ACCESS_TOKEN` is one shared secret — fine for yourself, but anyone you give it to has it forever.
@@ -318,8 +327,8 @@ See [`docs/ios-shortcut-setup.md`](./docs/ios-shortcut-setup.md) for the full st
 
 ## Known limitations / possible next steps
 
-- Nearest stops are picked purely by straight-line distance (currently top 4, to reasonably cover
-  both directions of a road). There's no reliable, documented pattern in LTA's bus stop codes for
+- Nearest stops are picked purely by straight-line distance (currently top 3, `NEAREST_STOPS`, to
+  reasonably cover both directions of a road). There's no reliable, documented pattern in LTA's bus stop codes for
   identifying "the stop across the road" directly — distance is the sturdiest general approach
   available.
 - Customer tokens have daily limits, but requests with made-up tokens aren't throttled (each costs

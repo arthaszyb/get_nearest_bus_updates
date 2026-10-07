@@ -8,8 +8,8 @@ const stop = (code, desc, road, metres) => ({ BusStopCode: code, Description: de
 const STOPS = [
   stop('28091', 'Lakeside Stn', 'Boon Lay Way', 90),
   stop('28099', 'Opp Lakeside Stn', 'Boon Lay Way', 186),
-  stop('28381', 'Blk 515', 'Jurong West St 52', 222),
-  stop('28389', 'Opp Blk 515 & 516', 'Jurong West St 52', 260),
+  stop('28381', 'Blk 515 & 516', 'Jurong West St 52', 222),
+  stop('28389', 'Opp Blk 515', 'Jurong West St 52', 260),
   stop('99999', 'Far Away', 'Nowhere Rd', 5000),
 ];
 
@@ -48,8 +48,7 @@ assert.equal((await call(`token=secret`)).status, 400);
 const text = await (await call(base)).text();
 assert.match(text, /^🚏 Lakeside Stn · 28091 · 90m\n49   🟢8 · 🟢26 · 🟡38 min\n98   🟡10/);
 assert.match(text, /180   🔴Now · 🟡12 · 🟢14 min/);
-assert.match(text, /🚏 Opp Blk 515 & 516 · 28389 · 260m\nNo arrival info/);
-assert.ok(!text.includes('Far Away'));
+assert.ok(!text.includes('28389') && !text.includes('Far Away'), 'only the nearest 3 stops');
 
 const json = await (await call(base + '&format=json')).json();
 assert.deepEqual(json.stops[0].services.map((s) => s.no), ['49', '98', '98M', '154', '180', '187', '240', '246']);
@@ -58,4 +57,4 @@ assert.deepEqual(json.stops[0].services.find((s) => s.no === '98M').buses, [{ mi
 const htmlRes = await call(base + '&format=html');
 assert.equal(htmlRes.headers.get('content-type'), 'text/html; charset=utf-8');
 const html = await htmlRes.text();
-assert.ok(html.includes('Opp Blk 515 &amp; 516') && !html.includes('515 & 516'));
+assert.ok(html.includes('Blk 515 &amp; 516') && !html.includes('515 & 516'));

@@ -4,6 +4,11 @@ compatibility_date = "2026-07-27"
 # Keep variables set in the dashboard (Payment Links etc.) when deploying from the CLI.
 keep_vars = true
 
+# Builds and refreshes the routes table (which services call at each stop) in the background,
+# a few LTA pages per run. Once it's fresh (rebuilt weekly) each run is a single KV read.
+[triggers]
+crons = ["*/5 * * * *"]
+
 # If you already deployed this Worker via the Cloudflare dashboard and want to
 # manage it from the CLI instead, set `name` above to match your existing
 # Worker's name so `wrangler deploy` updates it in place.

@@ -40,16 +40,30 @@ const LEGAL_UPDATED = '7 Oct 2026';
 const TEXT_HEADERS = { 'content-type': 'text/plain; charset=utf-8' };
 const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
 
-const STOPS_PAGE_SIZE = 500;
-const STOPS_PAGES_PER_BATCH = 12;
+const LTA_BASE = 'https://datamall2.mytransport.sg/ltaodataservice';
+const LTA_PAGE_SIZE = 500;
+// At most this many LTA calls in flight at once; LTA throttles bigger bursts.
+const LTA_CONCURRENCY = 4;
+const NEAREST_STOPS = 3;
 
-// One page of LTA's stop list, retried a couple of times (LTA throttles bursts of parallel calls).
-// Returns null if the page couldn't be loaded.
-async function fetchStopsPage(skip, headers) {
+// Which services call at each stop, from LTA's BusRoutes (~26,000 rows, ~53 pages). Too big to load
+// during a request, so it's built in the background a few pages at a time — by the cron trigger and
+// by requests that find it missing — and swapped in once complete.
+const ROUTES_CACHE_KEY = 'bus_routes_by_stop';
+const ROUTES_JOB_KEY = 'bus_routes_job';
+const ROUTES_LOCK_KEY = 'bus_routes_job_lock';
+const ROUTES_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Pages per background step. With retries this stays under the Workers free plan's 50 subrequests.
+const ROUTES_PAGES_PER_STEP = 12;
+// At most one background step a minute (KV's minimum expiry), to go easy on LTA.
+const ROUTES_LOCK_SECONDS = 60;
+
+// One page of an LTA dataset, retried a couple of times. Returns null if it couldn't be loaded.
+async function fetchLtaPage(dataset, skip, headers) {
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
     try {
-      const res = await fetch(`https://datamall2.mytransport.sg/ltaodataservice/BusStops?$skip=${skip}`, { headers });
+      const res = await fetch(`${LTA_BASE}/${dataset}?$skip=${skip}`, { headers });
       const body = res.ok ? await res.json() : null;
       if (Array.isArray(body?.value)) return body.value;
     } catch {
@@ -57,6 +71,28 @@ async function fetchStopsPage(skip, headers) {
     }
   }
   return null;
+}
+
+// Pages through an LTA dataset from `skip`, LTA_CONCURRENCY pages at a time, until a short page
+// (the end), a page that fails, or `maxPages`. Returns the records of the pages loaded in order,
+// where to resume, whether the end was reached, and whether a page failed.
+async function fetchLtaPages(dataset, headers, { skip = 0, maxPages = Infinity } = {}) {
+  const records = [];
+  let pages = 0;
+  while (pages < maxPages) {
+    const count = Math.min(LTA_CONCURRENCY, maxPages - pages);
+    const batch = await Promise.all(
+      Array.from({ length: count }, (_, i) => fetchLtaPage(dataset, skip + i * LTA_PAGE_SIZE, headers))
+    );
+    for (const page of batch) {
+      if (!page) return { records, nextSkip: skip, done: false, failed: true };
+      records.push(...page);
+      skip += LTA_PAGE_SIZE;
+      pages++;
+      if (page.length < LTA_PAGE_SIZE) return { records, nextSkip: skip, done: true, failed: false };
+    }
+  }
+  return { records, nextSkip: skip, done: false, failed: false };
 }
 
 // Loads the full bus stop list, using KV cache when available so we don't
@@ -69,31 +105,55 @@ async function getAllStops(env, headers, forceRefresh) {
     if (cached) return cached;
   }
 
-  // LTA BusStops API returns max 500 records per call, paginated via $skip. Fetch pages in
-  // parallel batches until one comes back short, i.e. the end of the list.
-  const allStops = [];
-  let complete = true;
-  for (let start = 0; ; start += STOPS_PAGE_SIZE * STOPS_PAGES_PER_BATCH) {
-    const pages = await Promise.all(
-      Array.from({ length: STOPS_PAGES_PER_BATCH }, (_, i) => fetchStopsPage(start + i * STOPS_PAGE_SIZE, headers))
-    );
-    for (const page of pages) {
-      if (page) allStops.push(...page);
-      else complete = false;
-    }
-    const last = pages.at(-1);
-    if (!last || last.length < STOPS_PAGE_SIZE) break;
-  }
+  const { records, done } = await fetchLtaPages('BusStops', headers);
 
   // A list with a page missing would leave whole areas without stops for a week, so only a
   // complete list is cached; an incomplete one still serves this request.
-  if (hasKV && complete && allStops.length > 0) {
-    await env.BUS_STOPS_KV.put(STOPS_CACHE_KEY, JSON.stringify(allStops), {
+  if (hasKV && done && records.length > 0) {
+    await env.BUS_STOPS_KV.put(STOPS_CACHE_KEY, JSON.stringify(records), {
       expirationTtl: STOPS_CACHE_TTL_SECONDS,
     });
   }
 
-  return allStops;
+  return records;
+}
+
+// { updatedAt, byStop: { "18101": "14,33,97" } } or null while it hasn't been built yet.
+async function getRoutesByStop(env) {
+  return env.BUS_STOPS_KV ? env.BUS_STOPS_KV.get(ROUTES_CACHE_KEY, 'json') : null;
+}
+
+// Advances the background build of the routes table by one step, if it's missing or stale and
+// no step ran in the last minute. Idempotent: if two ever overlap they only repeat work.
+async function refreshRoutesStep(env, now, current) {
+  const kv = env.BUS_STOPS_KV;
+  if (!kv || !env.LTA_API_KEY) return;
+  if (current === undefined) current = await getRoutesByStop(env);
+  if (current && now - current.updatedAt < ROUTES_MAX_AGE_MS) return;
+  if (await kv.get(ROUTES_LOCK_KEY)) return;
+  await kv.put(ROUTES_LOCK_KEY, String(now), { expirationTtl: ROUTES_LOCK_SECONDS });
+
+  const job = (await kv.get(ROUTES_JOB_KEY, 'json')) || { nextSkip: 0, byStop: {} };
+  const headers = { AccountKey: env.LTA_API_KEY, accept: 'application/json' };
+  const { records, nextSkip, done } = await fetchLtaPages('BusRoutes', headers, {
+    skip: job.nextSkip,
+    maxPages: ROUTES_PAGES_PER_STEP,
+  });
+  for (const { BusStopCode: code, ServiceNo: no } of records) {
+    const services = (job.byStop[code] ||= []);
+    if (!services.includes(no)) services.push(no);
+  }
+
+  if (done) {
+    const byStop = Object.fromEntries(
+      Object.entries(job.byStop).map(([code, services]) => [code, services.sort(compareServiceNo).join(',')])
+    );
+    await kv.put(ROUTES_CACHE_KEY, JSON.stringify({ updatedAt: now, byStop }));
+    await kv.delete(ROUTES_JOB_KEY);
+  } else {
+    await kv.put(ROUTES_JOB_KEY, JSON.stringify({ nextSkip, byStop: job.byStop }));
+  }
+  // The lock is left to expire, so this runs at most once a minute however busy the Worker is.
 }
 
 function dist(lat1, lon1, lat2, lon2) {
@@ -116,7 +176,7 @@ function compareServiceNo(a, b) {
 }
 
 // Turns one stop + its raw BusArrival response into the shape every output format renders from.
-function toStopModel(stop, arrival, now) {
+function toStopModel(stop, arrival, now, routeServices) {
   const services = (arrival?.Services || [])
     .map((svc) => ({
       no: svc.ServiceNo,
@@ -130,6 +190,10 @@ function toStopModel(stop, arrival, now) {
         })),
     }))
     .sort((a, b) => compareServiceNo(a.no, b.no));
+  // LTA leaves out services with no bus in operation, so name them from the routes table instead
+  // of letting them silently vanish.
+  const listed = new Set(services.map((svc) => svc.no));
+  const notRunning = (routeServices ? routeServices.split(',') : []).filter((no) => !listed.has(no));
 
   return {
     code: stop.BusStopCode,
@@ -137,6 +201,7 @@ function toStopModel(stop, arrival, now) {
     road: stop.RoadName,
     distance: Math.round(stop.d),
     services,
+    notRunning,
   };
 }
 
@@ -562,12 +627,13 @@ function renderText(stops, warning, renewUrl) {
   if (warning) lines.push(`⚠️ ${warning}${renewUrl ? ` Renew: ${renewUrl}` : ''}`, '');
   for (const stop of stops) {
     lines.push(`🚏 ${stop.name} · ${stop.code} · ${stop.distance}m`);
-    if (stop.services.length === 0) lines.push('No arrival info');
+    if (stop.services.length === 0 && stop.notRunning.length === 0) lines.push('No arrival info');
     for (const svc of stop.services) {
       const times = svc.buses.map((b) => `${LOAD_DOTS[b.load] || ''}${b.mins === 0 ? 'Now' : b.mins}`);
       const unit = svc.buses.at(-1)?.mins > 0 ? ' min' : '';
       lines.push(`${svc.no}   ${times.join(' · ') || '–'}${unit}`);
     }
+    if (stop.notRunning.length) lines.push(`Not running now: ${stop.notRunning.join(', ')}`);
     lines.push('');
   }
   lines.push('🟢 Seats  🟡 Standing  🔴 Full');
@@ -714,11 +780,16 @@ function renderStopCard(stop) {
             '</div>'
         )
         .join('')
-    : '<div class="row empty">No arrival info</div>';
+    : stop.notRunning.length
+      ? ''
+      : '<div class="row empty">No arrival info</div>';
+  const idle = stop.notRunning.length
+    ? `<div class="row empty">Not running now: ${stop.notRunning.map(escapeHtml).join(', ')}</div>`
+    : '';
   const meta = [stop.code, stop.road, `${stop.distance}m away`].filter(Boolean).map(escapeHtml).join(' · ');
   return `<section class="card">
   <div class="stop"><h2>${escapeHtml(stop.name)}</h2><p>${meta}</p></div>
-  ${rows}
+  ${rows}${idle}
 </section>`;
 }
 
@@ -856,7 +927,7 @@ async function handleFreeSignup(request, env, now) {
 // What the landing page's demo shows — a typical lunchtime at Lakeside.
 const SAMPLE_STOPS = [
   {
-    code: '28091', name: 'Lakeside Stn', road: 'Boon Lay Way', distance: 90,
+    code: '28091', name: 'Lakeside Stn', road: 'Boon Lay Way', distance: 90, notRunning: [],
     services: [
       { no: '49', buses: [{ mins: 3, load: 'seats', live: true }, { mins: 12, load: 'seats', live: true }, { mins: 24, load: 'standing', live: false }] },
       { no: '180', buses: [{ mins: 0, load: 'full', live: true }, { mins: 6, load: 'standing', live: true }, { mins: 14, load: 'seats', live: true }] },
@@ -864,7 +935,7 @@ const SAMPLE_STOPS = [
     ],
   },
   {
-    code: '28099', name: 'Opp Lakeside Stn', road: 'Boon Lay Way', distance: 186,
+    code: '28099', name: 'Opp Lakeside Stn', road: 'Boon Lay Way', distance: 186, notRunning: ['98M'],
     services: [
       { no: '98', buses: [{ mins: 2, load: 'standing', live: true }, { mins: 9, load: 'seats', live: true }, { mins: 17, load: 'seats', live: true }] },
       { no: '154', buses: [{ mins: 7, load: 'seats', live: true }, { mins: 15, load: 'seats', live: true }, { mins: 26, load: 'seats', live: false }] },
@@ -1020,7 +1091,12 @@ ${siteFooter(env, now)}`,
 }
 
 export default {
-  async fetch(request, env) {
+  // Cron trigger (wrangler.toml): keeps building / refreshing the routes table in the background.
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(refreshRoutesStep(env, Date.now()));
+  },
+
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const now = Date.now();
 
@@ -1059,12 +1135,13 @@ export default {
       return new Response('Could not load bus stop list — check LTA_API_KEY', { status: 502 });
     }
 
-    // Nearest 4 stops (better coverage of both directions of a road / an intersection)
+    // Nearest few stops (covers both directions of a road / an intersection)
     const nearest = allStops
       .map((s) => ({ ...s, d: dist(lat, lon, s.Latitude, s.Longitude) }))
       .sort((a, b) => a.d - b.d)
-      .slice(0, 4);
+      .slice(0, NEAREST_STOPS);
 
+    const routesPromise = getRoutesByStop(env);
     const arrivals = await Promise.all(
       nearest.map((s) =>
         fetch(`https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival?BusStopCode=${s.BusStopCode}`, {
@@ -1075,7 +1152,9 @@ export default {
       )
     );
 
-    const stops = nearest.map((stop, i) => toStopModel(stop, arrivals[i], now));
+    const routes = await routesPromise;
+    ctx?.waitUntil(refreshRoutesStep(env, now, routes));
+    const stops = nearest.map((stop, i) => toStopModel(stop, arrivals[i], now, routes?.byStop[stop.BusStopCode]));
     const pass = access.pass;
     const warning = expiryWarning(pass, now);
 

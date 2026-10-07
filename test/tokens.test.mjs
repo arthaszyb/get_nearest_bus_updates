@@ -40,7 +40,7 @@ const noDb = { ACCESS_TOKEN: 'owner-secret', LTA_API_KEY: 'k' };
 assert.equal((await get('token=owner-secret', noDb)).status, 200);
 assert.equal((await get('token=wrong', noDb)).status, 401);
 assert.equal((await get('', { LTA_API_KEY: 'k' })).status, 200, 'no gate configured stays open');
-stopListFetches = 0; await get('token=owner-secret&refresh=1'); assert.equal(stopListFetches, 12);
+stopListFetches = 0; await get('token=owner-secret&refresh=1'); assert.equal(stopListFetches, 4); // one wave of pages; the first is short, so that's the whole list
 
 // Admin auth
 assert.equal((await admin('GET', '', null, 'nope')).status, 401);
