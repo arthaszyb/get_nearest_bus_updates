@@ -26,7 +26,7 @@ const signup = (ip = '203.0.113.7') => worker.fetch(new Request('https://x.dev/f
 let res = await get('/');
 let html = await res.text();
 assert.equal(res.status, 200);
-assert.match(html, /<title>WhenBusArrive — live bus arrivals near you, in one tap<\/title>/);
+assert.match(html, /<title>BusNearby — live bus arrivals near you, in one tap<\/title>/);
 assert.match(html, /Which bus is coming\?/);
 assert.match(html, /<b>Launch offer<\/b> — subscribe by 30 Nov 2026/);
 assert.match(html, /<div class="was">S\$2\.90<\/div>\s*<div class="price">S\$1\.90 <small>\/ month<\/small>/);

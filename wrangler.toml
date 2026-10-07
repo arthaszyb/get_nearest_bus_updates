@@ -1,6 +1,8 @@
 name = "sg-bus-nearest"
 main = "worker/bus-nearest-worker.js"
 compatibility_date = "2024-01-01"
+# Keep variables set in the dashboard (Payment Links etc.) when deploying from the CLI.
+keep_vars = true
 
 # If you already deployed this Worker via the Cloudflare dashboard and want to
 # manage it from the CLI instead, set `name` above to match your existing

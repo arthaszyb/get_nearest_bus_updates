@@ -24,7 +24,7 @@ const SUBSCRIPTION_GRACE_DAYS = 2;
 const STRIPE_SIGNATURE_TOLERANCE_SECONDS = 300;
 
 // Website: landing page, pricing and free sign-up, served at / when there's no lat/lon or token.
-const PRODUCT_NAME = 'WhenBusArrive';
+const PRODUCT_NAME = 'BusNearby';
 const CURRENCY = 'S$';
 // Launch prices show until this moment; afterwards the page switches to the regular prices and links.
 const PROMO_ENDS_AT = Date.parse('2026-11-30T23:59:59+08:00');
@@ -748,7 +748,7 @@ const money = (amount) => `${CURRENCY}${amount.toFixed(2)}`;
 const capitalize = (s) => s.charAt(0).toUpperCase() + s.slice(1);
 const sitePage = (content, title, status = 200) =>
   new Response(htmlPage(`<div class="site">\n${content}\n</div>`, { title }), { status, headers: HTML_HEADERS });
-const brand = `<div class="brand"><a href="/" style="color:inherit;text-decoration:none">${PRODUCT_NAME.replace(/^When/, 'When<span>')}</span></a></div>`;
+const brand = `<div class="brand"><a href="/" style="color:inherit;text-decoration:none">${PRODUCT_NAME.replace(/^([A-Z][a-z]+)(.+)$/, '$1<span>$2</span>')}</a></div>`;
 
 function siteFooter(env, now) {
   const links = [
