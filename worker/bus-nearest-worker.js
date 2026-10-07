@@ -46,19 +46,26 @@ const LTA_PAGE_SIZE = 500;
 const LTA_CONCURRENCY = 4;
 const NEAREST_STOPS = 3;
 
-// One page of an LTA dataset, retried a couple of times. Returns null if it couldn't be loaded.
-async function fetchLtaPage(dataset, skip, headers) {
+// GETs an LTA endpoint, retrying failed calls (network errors, non-2xx such as throttling, or a
+// response `isValid` rejects) with a short backoff. Returns the JSON body, or null after 3 attempts.
+async function fetchLta(path, headers, isValid) {
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
     try {
-      const res = await fetch(`${LTA_BASE}/${dataset}?$skip=${skip}`, { headers });
+      const res = await fetch(`${LTA_BASE}/${path}`, { headers });
       const body = res.ok ? await res.json() : null;
-      if (Array.isArray(body?.value)) return body.value;
+      if (body && isValid(body)) return body;
     } catch {
       // network error: retry
     }
   }
   return null;
+}
+
+// One page of an LTA dataset, or null if it couldn't be loaded.
+async function fetchLtaPage(dataset, skip, headers) {
+  const body = await fetchLta(`${dataset}?$skip=${skip}`, headers, (b) => Array.isArray(b.value));
+  return body?.value ?? null;
 }
 
 // Pages through an LTA dataset from `skip`, LTA_CONCURRENCY pages at a time, until a short page
@@ -1079,11 +1086,7 @@ export default {
 
     const arrivals = await Promise.all(
       nearest.map((s) =>
-        fetch(`https://datamall2.mytransport.sg/ltaodataservice/v3/BusArrival?BusStopCode=${s.BusStopCode}`, {
-          headers,
-        })
-          .then((r) => r.json())
-          .catch(() => null)
+        fetchLta(`v3/BusArrival?BusStopCode=${s.BusStopCode}`, headers, (b) => Array.isArray(b.Services))
       )
     );
 

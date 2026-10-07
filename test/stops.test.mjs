@@ -46,3 +46,19 @@ t = setup({ total: 6400 });
 await t.request();
 assert.equal(t.cached(), 6400);
 assert.ok(t.calls.includes(6000));
+
+// BusArrival calls are retried too: a throttled first attempt still yields arrival times
+{
+  let arrivalCalls = 0;
+  const env = { LTA_API_KEY: 'k' };
+  globalThis.fetch = async (u) => {
+    const url = new URL(u);
+    if (url.pathname.endsWith('/BusStops')) return new Response(JSON.stringify({ value: url.searchParams.get('$skip') === '0' ? [near] : [] }));
+    arrivalCalls++;
+    if (arrivalCalls === 1) return new Response('Too many requests', { status: 429 });
+    return new Response(JSON.stringify({ Services: [{ ServiceNo: '14', NextBus: { EstimatedArrival: new Date(Date.now() + 5 * 60000).toISOString() } }] }));
+  };
+  const body = await (await worker.fetch(new Request('https://x.dev/?lat=1.3&lon=103.8&format=json'), env)).json();
+  assert.equal(arrivalCalls, 2);
+  assert.deepEqual(body.stops[0].services.map((s) => s.no), ['14']);
+}
