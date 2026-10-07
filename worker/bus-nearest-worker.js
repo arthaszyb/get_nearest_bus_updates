@@ -40,6 +40,25 @@ const LEGAL_UPDATED = '7 Oct 2026';
 const TEXT_HEADERS = { 'content-type': 'text/plain; charset=utf-8' };
 const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
 
+const STOPS_PAGE_SIZE = 500;
+const STOPS_PAGES_PER_BATCH = 12;
+
+// One page of LTA's stop list, retried a couple of times (LTA throttles bursts of parallel calls).
+// Returns null if the page couldn't be loaded.
+async function fetchStopsPage(skip, headers) {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 300 * attempt));
+    try {
+      const res = await fetch(`https://datamall2.mytransport.sg/ltaodataservice/BusStops?$skip=${skip}`, { headers });
+      const body = res.ok ? await res.json() : null;
+      if (Array.isArray(body?.value)) return body.value;
+    } catch {
+      // network error: retry
+    }
+  }
+  return null;
+}
+
 // Loads the full bus stop list, using KV cache when available so we don't
 // re-fetch ~5000 stops from LTA on every single request.
 async function getAllStops(env, headers, forceRefresh) {
@@ -50,19 +69,25 @@ async function getAllStops(env, headers, forceRefresh) {
     if (cached) return cached;
   }
 
-  // LTA BusStops API returns max 500 records per call, paginated via $skip.
-  // Fetch all pages in parallel (fast, one round trip).
-  const skips = [0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000, 5500];
-  const pages = await Promise.all(
-    skips.map((skip) =>
-      fetch(`https://datamall2.mytransport.sg/ltaodataservice/BusStops?$skip=${skip}`, { headers })
-        .then((r) => r.json())
-        .catch(() => ({ value: [] }))
-    )
-  );
-  const allStops = pages.flatMap((p) => p.value || []);
+  // LTA BusStops API returns max 500 records per call, paginated via $skip. Fetch pages in
+  // parallel batches until one comes back short, i.e. the end of the list.
+  const allStops = [];
+  let complete = true;
+  for (let start = 0; ; start += STOPS_PAGE_SIZE * STOPS_PAGES_PER_BATCH) {
+    const pages = await Promise.all(
+      Array.from({ length: STOPS_PAGES_PER_BATCH }, (_, i) => fetchStopsPage(start + i * STOPS_PAGE_SIZE, headers))
+    );
+    for (const page of pages) {
+      if (page) allStops.push(...page);
+      else complete = false;
+    }
+    const last = pages.at(-1);
+    if (!last || last.length < STOPS_PAGE_SIZE) break;
+  }
 
-  if (hasKV && allStops.length > 0) {
+  // A list with a page missing would leave whole areas without stops for a week, so only a
+  // complete list is cached; an incomplete one still serves this request.
+  if (hasKV && complete && allStops.length > 0) {
     await env.BUS_STOPS_KV.put(STOPS_CACHE_KEY, JSON.stringify(allStops), {
       expirationTtl: STOPS_CACHE_TTL_SECONDS,
     });
