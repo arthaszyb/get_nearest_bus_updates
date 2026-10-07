@@ -26,6 +26,12 @@ compatibility_date = "2024-01-01"
 # [vars]
 # RENEW_URL = "https://your-payment-link"
 # SHORTCUT_URL = "https://www.icloud.com/shortcuts/..."
+# PAYMENT_LINK_MONTHLY = "https://buy.stripe.com/..."
+# PAYMENT_LINK_YEARLY = "https://buy.stripe.com/..."
+# PAYMENT_LINK_MONTHLY_PROMO = "https://buy.stripe.com/..."
+# PAYMENT_LINK_YEARLY_PROMO = "https://buy.stripe.com/..."
+# MANAGE_URL = "https://billing.stripe.com/p/login/..."
+# SUPPORT_EMAIL = "hello@your-domain"
 
 # Secrets (LTA_API_KEY, ACCESS_TOKEN, ADMIN_SECRET, STRIPE_WEBHOOK_SECRET) are NOT set
 # here — never commit secrets to wrangler.toml. Set them with:

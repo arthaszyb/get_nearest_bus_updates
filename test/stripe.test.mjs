@@ -87,7 +87,7 @@ assert.ok(token, 'welcome page shows the token');
 assert.ok(!html.includes('http-equiv="refresh"'));
 assert.match(html, /<meta name="referrer" content="no-referrer">/);
 assert.match(html, /<a href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Add the Shortcut<\/a>/);
-assert.match(html, /yearly pass · Valid until 8 Oct 2027 · ref tk_/);
+assert.match(html, /Yearly pass · Valid until 8 Oct 2027 · 300 checks a day · ref tk_/);
 assert.equal(await busStatus(token), 200, 'issued token works');
 assert.equal(await tokenFromWelcome('cs_live_one'), token, 'revisiting shows the same token');
 
@@ -141,7 +141,7 @@ assert.equal(row.stripe_subscription, 'sub_1');
 assert.equal(row.note, 'Stripe test mode');
 assert.equal(row.expires_at, start + 31 * DAY);
 const subToken = await tokenFromWelcome('cs_test_sub');
-assert.match(await (await welcome('cs_test_sub')).text(), /monthly pass · Renews automatically · paid until 7 Nov 2026/);
+assert.match(await (await welcome('cs_test_sub')).text(), /Monthly pass · Renews automatically · paid until 7 Nov 2026 · 300 checks a day/);
 
 const periodEnd = (ms) => Math.floor(ms / 1000);
 // First invoice (newer API shape): exact period end + grace, never shortening

@@ -126,7 +126,7 @@ Your own `ACCESS_TOKEN` keeps working as before, with no expiry or limit.
 
 | Setting | Meaning |
 | --- | --- |
-| `plan` | `trial` / `monthly` / `yearly` / `lifetime`. Sets the default length and daily limit (`PLANS` at the top of the worker); both can be overridden per token |
+| `plan` | `free` / `trial` / `monthly` / `yearly` / `lifetime`. Sets the default length and daily limit (`PLANS` at the top of the worker); both can be overridden per token |
 | `expiresAt` | When it stops working. `null` = never |
 | `startOnFirstUse` | For codes handed out ahead of time (promos, gifts): the days start counting at the first request instead of at issue |
 | `dailyLimit` | Max requests per Singapore calendar day, reset at midnight SGT. `null` = unlimited. Caps your cost and makes one token shared among many people impractical. Every request counts, including the HTML view's 30-second auto-refresh |
@@ -189,6 +189,40 @@ JSON responses for customer tokens also include `pass` (plan, expiry, daily limi
 See [Sharing the Shortcut](./docs/ios-shortcut-setup.md#sharing-the-shortcut-with-customers) for
 handing the Shortcut out so each customer pastes in their own token.
 
+### Website
+
+Once `DB` is bound, the Worker also serves the customer-facing site:
+
+| Path | Page |
+| --- | --- |
+| `/` (no `lat`/`token`) | Landing page: what it does, a live-looking demo, how it works, pricing |
+| `POST /free` | "Get free pass" button: issues a `free` pass (30 days, 4 checks a day) and shows the token once |
+| `/welcome` | After a Stripe payment: the customer's token (see below) |
+| `/privacy`, `/terms` | Privacy policy and terms — templates, have them reviewed before launch |
+
+Product name, currency, prices and the launch-offer end date are constants at the top of the
+worker (`PRODUCT_NAME`, `PAID_PLANS`, `PROMO_ENDS_AT`). Prices there are only what the page shows;
+customers pay whatever their Payment Link charges. Until `PROMO_ENDS_AT` the page shows the launch
+prices and uses the `*_PROMO` links; afterwards it switches to the regular ones by itself.
+
+| Variable | Used for |
+| --- | --- |
+| `PAYMENT_LINK_MONTHLY`, `PAYMENT_LINK_YEARLY` | Subscribe buttons at regular prices |
+| `PAYMENT_LINK_MONTHLY_PROMO`, `PAYMENT_LINK_YEARLY_PROMO` | Subscribe buttons during the launch offer |
+| `MANAGE_URL` | "Manage subscription" link — your Stripe customer portal login link |
+| `SUPPORT_EMAIL` | Contact link and the address in the privacy policy and terms |
+| `SHORTCUT_URL` | "Add the Shortcut" link on the token pages |
+| `RENEW_URL` | Where expired and free passes are sent; defaults to the pricing section |
+
+A plan without a Payment Link shows "Coming soon". Free passes are limited to 3 per network per
+day, using a one-way hash that changes daily rather than storing IP addresses (migration
+[`0003`](./migrations/0003_free_signups.sql)). The free pass's HTML view doesn't auto-refresh, so it
+doesn't burn its 4 daily checks.
+
+Keep the launch price for launch subscribers: create the launch prices as separate Stripe prices
+(not a coupon that expires); subscriptions stay on the price they started with, which is what the
+page promises.
+
 ### Selling with Stripe
 
 With this set up, a customer pays through a Stripe Payment Link, lands on a page showing their new
@@ -196,8 +230,7 @@ token and a link to add the Shortcut, and is set up — no manual step on your s
 keep their token valid for as long as they're paid.
 
 1. Run the migrations again (`wrangler d1 migrations apply sg-bus-nearest --remote`) — or paste
-   [`migrations/0002_stripe.sql`](./migrations/0002_stripe.sql) into the D1 Console — to add the
-   Stripe columns.
+   each file in [`migrations/`](./migrations) into the D1 Console, in order, each once.
 2. In Stripe, create a Payment Link per product: a one-off price for passes, or a recurring price
    for subscriptions.
 3. Give each Payment Link a `plan` **metadata** entry: `trial`, `monthly`, `yearly` or `lifetime`.
@@ -296,8 +329,8 @@ See [`docs/ios-shortcut-setup.md`](./docs/ios-shortcut-setup.md) for the full st
 ## Tests
 
 `node --test` — Node 22+, nothing to install. Covers the output formats against mocked LTA
-responses, and the customer-token lifecycle and Stripe webhooks against a local SQLite stand-in
-for D1.
+responses, and the customer-token lifecycle, Stripe webhooks and website against a local SQLite
+stand-in for D1.
 
 ## License
 
