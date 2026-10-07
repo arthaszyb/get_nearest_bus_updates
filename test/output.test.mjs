@@ -52,7 +52,7 @@ assert.match(text, /\n99   N\/A\n/, 'service listed by LTA without arrival times
 assert.ok(!text.includes('28389') && !text.includes('Far Away'), 'only the nearest 3 stops');
 
 const json = await (await call(base + '&format=json')).json();
-assert.deepEqual(json.stops[0].services.map((s) => s.no), ['49', '98', '98M', '154', '180', '187', '240', '246']);
+assert.deepEqual(json.stops[0].services.map((s) => s.no), ['49', '98', '98M', '99', '154', '180', '187', '240', '246']);
 assert.deepEqual(json.stops[0].services.find((s) => s.no === '98M').buses, [{ mins: 36, load: 'seats', live: false }]);
 
 const htmlRes = await call(base + '&format=html');
