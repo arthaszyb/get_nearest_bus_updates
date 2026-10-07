@@ -1,4 +1,4 @@
-name = "still-hall-b0f1"
+name = "busnearby"
 main = "worker/bus-nearest-worker.js"
 compatibility_date = "2026-07-27"
 # Keep variables set in the dashboard (Payment Links etc.) when deploying from the CLI.
