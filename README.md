@@ -102,16 +102,26 @@ nothing breaks if you skip this step.
 GET /?lat={latitude}&lon={longitude}&token={your ACCESS_TOKEN}
 ```
 
-Optional: `&refresh=1` to bypass the stop-list cache for this request.
+Optional:
 
-Returns `text/plain`, nearest stops first, one arrival line per bus service. Example:
+- `&format=html` — a styled, dark-mode-aware page (stop cards, colour-coded crowding, auto-refresh
+  every 30s). Open it with the Shortcut's **Show Web Page** action.
+- `&format=json` — the same data as structured JSON, for building your own front end.
+- `&refresh=1` — bypass the stop-list cache for this request.
+
+By default it returns `text/plain`: nearest stops first, one line per bus service (sorted 49, 98,
+98M, 154…), the next three arrivals in minutes, each prefixed with a crowding dot. Example:
 
 ```
-【Blk 272 43161】(135m)
-173: 10min, 27min
+🚏 Lakeside Stn · 28091 · 90m
+49   🟢8 · 🟢26 · 🟡38 min
+98M   🟢36 min
+180   🔴Now · 🟡12 · 🟢14 min
 
-【Blk 254 43169】(166m)
+🚏 Opp Blk 515 & 516 · 28389 · 260m
 No arrival info
+
+🟢 Seats  🟡 Standing  🔴 Full
 ```
 
 `401` if the token doesn't match. `400` if `lat`/`lon` are missing or invalid. `502` if the stop
