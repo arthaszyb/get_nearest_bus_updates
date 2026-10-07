@@ -34,7 +34,7 @@ assert.match(html, /<div class="was">S\$29\.90<\/div>\s*<div class="price">S\$18
 assert.match(html, /Save 17%/); // 18.90 vs 12 × 1.90
 assert.match(html, /href="https:\/\/buy\.stripe\.com\/monthly-launch">Subscribe/);
 assert.match(html, /href="https:\/\/buy\.stripe\.com\/yearly-launch">Subscribe/);
-assert.match(html, /<form method="post" action="\/free">/);
+assert.match(html, /<a class="btn secondary" href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Get free pass<\/a>/, 'Get free pass installs the Shortcut');
 assert.match(html, /4 checks a day<\/li><li>Built in — no sign-up, no token/);
 assert.match(html, /Free is on by default — you don't need a pass to use it\./);
 assert.match(html, /<a class="btn" href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Try it free/);
@@ -59,6 +59,7 @@ html = await (await get('/', { ...env, PAYMENT_LINK_MONTHLY_PROMO: undefined }))
 assert.match(html, /href="https:\/\/buy\.stripe\.com\/monthly">Subscribe/);
 html = await (await get('/', { BUS_STOPS_KV, DB })).text();
 assert.equal((html.match(/Coming soon/g) || []).length, 2);
+assert.match(html, /<form method="post" action="\/free">/, 'without a Shortcut link, Get free pass issues a token');
 assert.ok(!html.includes('Manage subscription') && !html.includes('mailto:'));
 
 // API behaviour at / is unchanged
@@ -68,14 +69,17 @@ assert.equal((await get('/?lat=1.3442&lon=103.721&token=owner')).status, 200);
 assert.equal((await get('/', { ACCESS_TOKEN: 'owner', LTA_API_KEY: 'k' })).status, 401, 'no website without a DB');
 
 // Legal pages
-for (const path of ['/privacy', '/terms']) {
+for (const path of ['/privacy', '/terms', '/install']) {
   res = await get(path);
   assert.equal(res.status, 200);
   html = await res.text();
   assert.match(html, /mailto:hello@example\.com/);
-  assert.match(html, /Last updated 7 Oct 2026/);
+  if (path !== '/install') assert.match(html, /Last updated 7 Oct 2026/);
 }
 assert.match(await (await get('/privacy')).text(), /Personal Data Protection Act/);
+html = await (await get('/install')).text();
+assert.match(html, /<a class="btn" href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Add BusNearby to iPhone<\/a>/);
+assert.match(html, /Leave it empty to use the free plan<\/b> — 4 checks a day/);
 
 // --- Free pass ---
 res = await signup();
@@ -85,7 +89,7 @@ const token = html.match(/id="token">(sgb_[a-z0-9]{32})</)?.[1];
 assert.ok(token);
 assert.match(html, /Free pass · Valid until 6 Nov 2026 · 4 checks a day · ref tk_\w+ · <a href="\/#pricing">Upgrade<\/a>/);
 assert.match(html, /can’t be shown again/);
-assert.match(html, /href="https:\/\/www\.icloud\.com\/shortcuts\/abc">Add the Shortcut/);
+assert.match(html, /location\.href = &quot;https:\/\/www\.icloud\.com\/shortcuts\/abc&quot;[^>]*>Copy token &amp; open the Shortcut</);
 const stored = sqlite.prepare('SELECT * FROM tokens WHERE plan = ?').get('free');
 assert.equal(stored.daily_limit, 4);
 assert.ok(!JSON.stringify(stored).includes('203.0.113.7'), 'IP is not stored');

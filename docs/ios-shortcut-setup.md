@@ -1,88 +1,92 @@
-# iOS Shortcut setup
+# Building and sharing the BusNearby Shortcut
 
-Assumes you've already deployed the Cloudflare Worker per the main [README](../README.md) and
-have its URL, e.g. `https://your-worker.your-subdomain.workers.dev`.
+This is the owner's guide: how to build the one Shortcut every customer installs, and how to
+publish it. Customers never follow these steps — they tap one link and they're set up (their guide
+is the website's `/install` page).
 
-## Steps
+The finished Shortcut:
 
-1. Open the **Shortcuts** app → tap **+** to create a new Shortcut
-2. Add action: **Get Current Location**
-3. Add action: **URL**, set its content to:
+- works for free with no setup (4 checks a day per device),
+- uses a paid token if the customer pasted one when adding it,
+- shows the styled arrivals page for the 3 stops nearest them.
 
-   ```
-   https://your-worker-url/?lat=
-   ```
+Everything below happens in the **Shortcuts** app on an iPhone. Throughout, `WORKER` means
+`https://busnearby.arthas-zyb.workers.dev` (or your own domain, once you have one).
 
-   With the cursor at the end, tap the variable-insert icon above the keyboard and insert the
-   result of "Get Current Location". Tap that inserted variable again — a property list pops up —
-   choose **Latitude**.
-   Then type `&lon=` and insert "Get Current Location" again, this time choosing **Longitude**.
-   Finally type `&token=your-access-token`.
+## 1. Build it
 
-4. Add action: **Get Contents of URL** — it automatically picks up the URL from the previous step
-5. Add action: **Show Result** (or **Quick Look**), with content set to the result of "Get
-   Contents of URL"
+Create a new Shortcut, name it **BusNearby**, and add these actions in this order.
 
-   > Don't use **Show Notification** — iOS notification banners only display the first couple of
-   > lines and truncate anything longer. **Show Result** / **Quick Look** display the full text.
+| # | Action | Set it up like this |
+| --- | --- | --- |
+| 1 | **Text** | Leave it **empty**. This holds the customer's token; step 3 turns it into the install-time question. |
+| 2 | **Get Device Details** | Detail: **Device Name** |
+| 3 | **Get Device Details** | Detail: **Device Model** |
+| 4 | **Get Device Details** | Detail: **System Version** |
+| 5 | **Get Device Details** | Detail: **Screen Width** |
+| 6 | **Get Device Details** | Detail: **Screen Height** |
+| 7 | **Text** | Insert the results of actions 2–6 as variables, separated by `\|`:<br>`Device Name\|Device Model\|System Version\|Screen Width\|Screen Height` |
+| 8 | **URL Encode** | Mode: **Encode**, input: the Text from action 7 |
+| 9 | **Get Current Location** | — |
+| 10 | **URL** | `WORKER/?lat=` **Current Location › Latitude** `&lon=` **Current Location › Longitude** `&format=html&token=` **Text (action 1)** `&device=` **URL Encoded Text (action 8)** |
+| 11 | **Show Web Page** | Input: the URL from action 10 |
 
-6. Tap the ▶️ play button to test. It should immediately show arrival times for the nearest stops
-   — no stop-picking list, no confirmation dialog.
+How to insert a variable: put the cursor where it goes, tap the variable bar above the keyboard,
+and pick the action's output. For Latitude and Longitude, insert **Current Location**, tap the
+inserted variable, and choose the property.
 
-## Styled view (recommended)
+Why each piece is there:
 
-The steps above show the plain-text version in iOS's built-in result sheet. For the styled page
-(stop cards, colour-coded crowding, dark mode, auto-refresh every 30s):
+- **Action 1 (token)** — empty means "free plan"; the Worker ignores an empty `token`. A pasted
+  token always takes precedence over the free plan.
+- **Actions 2–8 (device)** — iOS gives Shortcuts no stable device ID, so the free plan's daily
+  count is keyed on a one-way hash of these details. Only the hash is stored. URL-encoding keeps
+  names with spaces, apostrophes or non-Latin characters intact.
+- **`format=html` + Show Web Page** — the styled page with stop cards and crowding colours.
+  (Drop `&format=html` and use **Get Contents of URL** → **Show Result** for plain text instead.)
 
-1. In step 3, add `&format=html` to the end of the URL
-2. Delete **Get Contents of URL** and **Show Result**, and add **Show Web Page** in their place —
-   it opens the URL from step 3 in an in-app Safari sheet
+Tap ▶︎ to test. Allow location and the connection to the Worker when asked. You should see the
+nearest 3 stops; a fifth run in one day should say you've used today's 4 free checks.
 
-Don't use **Quick Look** for this — it doesn't reliably render HTML pages.
+## 2. Make it ask for the token on install
 
-## Free tier without a token
+1. In the Shortcut editor, tap the name at the top (or ⓘ) › **Setup** (labelled **Import
+   Questions** on some iOS versions) › **Add Question**.
+2. Pick action 1's **Text** field.
+3. Question: `Paste your BusNearby token, or leave this empty to use the free plan.`
+4. Default answer: leave it **empty**.
 
-If the Worker sells passes (D1 bound), requests without a token get 4 free checks a day per device.
-iOS doesn't give Shortcuts a stable device ID, so the Shortcut sends its device details and the Worker
-counts by a one-way hash of them:
+## 3. Check before sharing
 
-1. Before the **URL** action, add **Get Device Details** four times (or once per detail) for
-   *Device Name*, *Device Model*, *System Version* and *Screen Width*.
-2. Add a **Text** action joining them, e.g. `Device Name|Device Model|System Version|Screen Width`
-   (insert each as a variable), then a **URL Encode** action on that text.
-3. In the URL, replace `&token=…` with `&device=` followed by the URL Encode result. Keep the
-   `&token=` part too if you want the Shortcut to use a paid token when one is filled in — a token,
-   when present, always takes precedence.
+- [ ] Action 1 is **empty** — never share with your own `ACCESS_TOKEN` in it. It has no limit and
+      never expires; anyone with the Shortcut would have it.
+- [ ] The URL points at `WORKER` and has `&device=` and `&format=html`.
+- [ ] A test run works, and a run with a customer token works.
 
-When a device has used its 4 checks, the response says so and links to upgrading.
+## 4. Share it
 
-## Sharing the Shortcut with customers
+1. Touch and hold **BusNearby** › **Share** › **Copy iCloud Link**. The link looks like
+   `https://www.icloud.com/shortcuts/…`.
+2. In the Cloudflare dashboard, set it as the Worker variable **`SHORTCUT_URL`** on `busnearby`
+   (Settings › Variables and Secrets). From then on:
+   - the landing page's **Try it free** and **Get free pass** buttons install the Shortcut in one tap,
+   - `/install` has an **Add BusNearby to iPhone** button,
+   - after paying, **Copy token & open the Shortcut** copies the customer's token and opens it, so
+     they tap **Replace** and paste.
+3. Post the **website link**, not the iCloud link, in communities (RoutineHub, r/shortcuts,
+   r/singapore, HardwareZone, Telegram groups) — the site explains the product, shows pricing and
+   installs the Shortcut.
 
-If you sell access with per-customer tokens (see the main README), share one Shortcut and have
-iOS ask each person for their own token when they add it:
+## 5. Updating the Shortcut later
 
-1. Add a **Text** action at the very top of the Shortcut containing just the token. In the **URL**
-   action, delete the token after `&token=` and insert the Text action's output there instead.
-2. Open the Shortcut's details (ⓘ) → **Setup** → **Add Question**, pick the Text action, and set
-   the prompt to something like "Paste your access token".
-3. **Clear your own token out of the Text action** (leave a placeholder like `paste-token-here`) —
-   whatever is in it when you share becomes the default answer everyone sees.
-4. Share → **Copy iCloud Link**, and send that link along with each customer's token. If you sell
-   through Stripe, set it as the Worker's `SHORTCUT_URL` and the welcome page hands it out for you.
-
-Renewing a customer (`extend`) keeps their token, so they never need to touch the Shortcut again.
-Only `rotate` gives them a new token to paste in.
+Edit it on your iPhone, then **Share › Copy iCloud Link** again. Each share makes a new link, so
+update `SHORTCUT_URL` to the new one. People who already installed it keep their copy until they
+re-add it from the new link (choosing **Replace**).
 
 ## Troubleshooting
 
-- **"No valid file provider found" / prompted for Face ID**: this means whichever Shortcut you're
-  running depends on a local file cache (Files app / iCloud Drive), and Files access is locked.
-  This project's Worker approach doesn't touch local files at all, so it won't hit this — if
-  you're seeing it, you're likely running a different, file-caching Shortcut instead.
-- **Only 2 lines shown / content cut off**: you're using "Show Notification". Switch to "Show
-  Result" or "Quick Look" per step 5 above.
-
-## Add to Home Screen / Lock Screen
-
-Once it's working, add the Shortcut as a Home Screen or Lock Screen widget for a true one-tap
-experience.
+- **"No valid file provider found" / Face ID prompts** — that Shortcut reads files; this one
+  doesn't. Make sure you're running BusNearby.
+- **Nothing shows / "Missing access token."** — action 10's URL is missing `&device=`.
+- **Free checks run out unexpectedly** — the device details aren't reaching the Worker (check
+  actions 7–8 and the `&device=` variable), or another device has exactly the same details.
