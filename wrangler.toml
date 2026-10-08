@@ -14,6 +14,8 @@ crons = ["*/5 * * * *"]
 # location (and, from older Shortcuts, the token); the Worker writes its own line per request instead.
 [observability]
 enabled = true
+# Strips query strings (lat/lon, and tokens from older Shortcuts) from logged and traced URLs.
+redact_query_string = true
 
 [observability.logs]
 enabled = true
