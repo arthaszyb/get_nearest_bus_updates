@@ -1,9 +1,12 @@
-# SG Bus Nearest 🚌
+# BusBoard 🚌
 
-One-tap nearest-bus-stop arrival times for Singapore, wired up as a 4-step iOS Shortcut.
+**The bus stop display, in your pocket.** Live arrivals for the Singapore bus stops around you —
+every bus, when it's coming, how full it is and where it's going — like the display screen at the
+stop.
 
-No stop-picking menus. No confirmation dialogs. No local file dependencies.
-Tap the Shortcut → it locates you → it tells you what's coming and when.
+It runs as a web app that installs to the Home Screen on iPhone and Android (no app store), and on
+iPhone also as a Shortcut for Siri, widgets and the Action button. No stop-picking menus, no
+confirmation dialogs: open it → it locates you → it shows what's coming.
 
 ## Why this exists
 
@@ -212,10 +215,12 @@ Once `DB` is bound, the Worker also serves the customer-facing site:
 | Path | Page |
 | --- | --- |
 | `/` (no `lat`/`token`) | Landing page: what it does, a live-looking demo, how it works, pricing |
-| `POST /free` | Issues a `free` token (30 days, 4 a day) — what "Get free pass" does until `SHORTCUT_URL` is set; after that the button installs the Shortcut, since free needs no token |
-| `/install` | Customer install guide with a one-tap "Add BusNearby to iPhone" button |
+| `/app` | The web app (see [Web app](#web-app-app)) |
+| `/renew?ref=tk_…` | Top-up page for one pass: the paid plans, paying extends that pass (see below) |
+| `POST /free` | Issues a `free` token (30 days, 4 a day). The site no longer links to it — free is built in |
+| `/install` | Customer guide: web app on iPhone and Android, and the optional iPhone Shortcut |
 | `/?lat=…&lon=…&device=…` | Built-in free tier, no token: 4 checks a day per device (see the Shortcut guide) |
-| `/welcome` | After a Stripe payment: the customer's token (see below) |
+| `/welcome` | After a payment: the customer's token, or confirmation that their pass was extended |
 | `/privacy`, `/terms` | Privacy policy and terms — templates, have them reviewed before launch |
 
 Product name, currency, prices and the launch-offer end date are constants at the top of the
@@ -225,32 +230,35 @@ prices and uses the `*_PROMO` links; afterwards it switches to the regular ones 
 
 | Variable | Used for |
 | --- | --- |
-| `PAYMENT_LINK_MONTHLY`, `PAYMENT_LINK_YEARLY` | Subscribe buttons at regular prices |
-| `PAYMENT_LINK_MONTHLY_PROMO`, `PAYMENT_LINK_YEARLY_PROMO` | Subscribe buttons during the launch offer |
-| `MANAGE_URL` | "Manage subscription" link — your Stripe customer portal login link |
+| `PAYMENT_LINK_MONTHLY`, `PAYMENT_LINK_YEARLY` | Buy buttons at regular prices |
+| `PAYMENT_LINK_MONTHLY_PROMO`, `PAYMENT_LINK_YEARLY_PROMO` | Buy buttons while launch prices run |
 | `SUPPORT_EMAIL` | Contact link and the address in the privacy policy and terms |
-| `SHORTCUT_URL` | "Add the Shortcut" link on the token pages |
-| `RENEW_URL` | Where expired and free passes are sent; defaults to the pricing section |
+| `SHORTCUT_URL` | "Add the Shortcut" links on the install guide and token pages |
+| `RENEW_URL` | Replaces the built-in top-up page as the Renew/Upgrade link — leave unset to keep top-ups |
 
 A plan without a Payment Link shows "Coming soon". Free passes are limited to 3 per network per
 day, using a one-way hash that changes daily rather than storing IP addresses (migration
 [`0003`](./migrations/0003_free_signups.sql)). The free pass's HTML view doesn't auto-refresh, so it
 doesn't burn its 4 daily checks.
 
-Keep the launch price for launch subscribers: create the launch prices as separate Stripe prices
-(not a coupon that expires); subscriptions stay on the price they started with, which is what the
-page promises.
+### Selling passes (PayNow through Stripe)
 
-### Selling with Stripe
+Passes are **one-off payments**, not subscriptions. At S$1.90, a card costs 3.4% + S$0.50 (about
+30% of the price); PayNow costs 1.3% with no fixed fee (check stripe.com/sg/pricing). PayNow can't
+do recurring payments, so a "monthly" pass is 31 days, bought once, and customers top up.
 
-With this set up, a customer pays through a Stripe Payment Link, lands on a page showing their new
-token and a link to add the Shortcut, and is set up — no manual step on your side. Subscriptions
-keep their token valid for as long as they're paid.
+With this set up, a customer pays through a Stripe Payment Link (PayNow or card), lands on a page
+showing their new token, and is set up — no manual step on your side. When a pass is about to run
+out (3 days before) or has, its Renew link goes to `/renew?ref=<token id>`, whose buy buttons add
+`?client_reference_id=<token id>` to the Payment Links; paying there **extends the same pass**
+from its current end date (or from now, if it already ended), so nothing changes on the phone.
 
 1. Run the migrations again (`wrangler d1 migrations apply sg-bus-nearest --remote`) — or paste
    each file in [`migrations/`](./migrations) into the D1 Console, in order, each once.
-2. In Stripe, create a Payment Link per product: a one-off price for passes, or a recurring price
-   for subscriptions.
+2. In Stripe, turn on **PayNow** (Settings → Payment methods), then create a Payment Link per plan
+   with a **one-off** price in SGD (monthly S$2.90, yearly S$29.90, and the launch-price links
+   S$1.90 / S$18.90). PayNow only shows up on one-off prices. Leave cards on too if you like —
+   customers pick.
 3. Give each Payment Link a `plan` **metadata** entry: `trial`, `monthly`, `yearly` or `lifetime`.
    Stripe copies it onto every purchase, so customers can't swap in a different plan. Optional
    `days` and `daily_limit` entries override the plan's defaults, e.g. `plan=monthly` + `days=92` for
@@ -271,16 +279,18 @@ keep their token valid for as long as they're paid.
    `checkout.session.completed`, `checkout.session.async_payment_succeeded`, `invoice.paid` and
    `customer.subscription.deleted`. Save its signing secret as the Worker secret
    `STRIPE_WEBHOOK_SECRET`.
-6. Optional variables: `SHORTCUT_URL` — the iCloud link of your shared Shortcut, shown on the welcome
-   page; `RENEW_URL` — point it at your Payment Link.
+6. Set the four `PAYMENT_LINK_*` variables to the links. Optional: `SHORTCUT_URL` — the iCloud
+   link of your shared Shortcut.
 
 How purchases map onto tokens:
 
 | Stripe event | What happens |
 | --- | --- |
 | Checkout completed and paid | Token issued with the plan from metadata, the customer's email in `customer` |
+| … with `client_reference_id` = an active, dated pass | No new token: that pass gets the plan's days added to its end date (or to now if it ended), and the plan's limit. Recorded in `topups` ([`0005`](./migrations/0005_topups.sql)) so a retried webhook can't add twice |
+| … with a `client_reference_id` that isn't one | A new token, as normal |
 | Checkout completed, payment still pending (delayed methods) | Nothing until `checkout.session.async_payment_succeeded` |
-| `invoice.paid` on a subscription | Expiry moves to the end of the paid period + 2 days' grace — never earlier |
+| `invoice.paid` on a subscription (if you also sell subscriptions) | Expiry moves to the end of the paid period + 2 days' grace — never earlier |
 | Renewal payment fails | Nothing; the token runs out at the end of the grace period, and works again if a later payment succeeds |
 | `customer.subscription.deleted` | Expiry pulled in to the moment the subscription ended (period end, or immediately) |
 | Refund or dispute | Not automatic — revoke the token with the admin API |
@@ -337,6 +347,43 @@ bad or missing `LTA_API_KEY`).
 See [`docs/ios-shortcut-setup.md`](./docs/ios-shortcut-setup.md) for building and sharing the Shortcut.
 Customers follow the website's `/install` page.
 
+## Web app (`/app`)
+
+The main way in, on any phone: open `WORKER/app` and add it to the Home Screen. It then opens full
+screen with no browser bars, like an app.
+
+- **iPhone:** Safari › Share › Add to Home Screen.
+- **Android:** Chrome offers **Install** (the app shows its own Install button when Chrome allows
+  it), or ⋮ › Install app. A small service worker (`/sw.js`) makes it installable and shows the app
+  shell when offline; it never caches arrival data.
+- Location comes from the browser (it asks for permission).
+- Free plan: a random device ID is created on first launch and kept in the app's storage, so the
+  4-a-day allowance counts per install. Deleting the app (or its website data) starts a new one.
+- Paid: tap **Token** and paste the token, or open the pass page's "open BusBoard with this token"
+  link (`/app#token=…`; the fragment never reaches the server). It's kept on the device.
+- Token and device ID are sent as `Authorization` / `X-Device` headers, never in the URL.
+- Paid passes auto-refresh every 30s while the app is open; every pass refreshes when you come back
+  to the app after more than a minute.
+- Icons are generated by `scripts/build-app-icons.py` into `worker/app-icons.js`.
+
+The iPhone Shortcut ([guide](./docs/ios-shortcut-setup.md)) shows the same display through Quick
+Look and adds Siri, widgets and the Action button.
+
+## Logs and tracing
+
+`wrangler.toml` turns on Workers Logs and automatic tracing (dashboard › Workers › busnearby ›
+Observability; Cloudflare keeps them up to 7 days). The automatic per-request log is **off**,
+because it records the full URL — the location, and tokens from Shortcuts that still send them as
+query parameters. Instead the Worker writes one JSON line per request:
+
+```json
+{"method":"GET","path":"/","format":"html","access":"token","plan":"monthly","ref":"tk_ab12cd34","stops":"18101,18109,18241","services":11,"status":200,"ms":412}
+```
+
+`access` is `owner`, `token`, `device` (built-in free tier) or `denied` (with `reason`); `ref` is
+the token's id, never the token. Uncaught errors are logged with their stack and answered with a
+plain 500. Traces may still carry request URLs (with the location) — the privacy policy says so.
+
 ## Known limitations / possible next steps
 
 - Nearest stops are picked purely by straight-line distance (currently top 3, `NEAREST_STOPS`, to
@@ -346,6 +393,8 @@ Customers follow the website's `/install` page.
 - Customer tokens have daily limits, but requests with made-up tokens aren't throttled (each costs
   one D1 lookup). Add a Cloudflare Rate Limiting Rule if the endpoint ever gets hammered.
 - Stripe refunds and disputes don't revoke tokens automatically — use the admin API.
+- Ads for the free tier aren't built yet; the natural place is a slot in the HTML page shown only
+  without a paid pass (so "no ads" becomes part of what a pass buys).
 
 ## Tests
 
@@ -356,16 +405,3 @@ stand-in for D1.
 ## License
 
 MIT — see [LICENSE](./LICENSE).
-
-## Home Screen web app (`/app`)
-
-An alternative to the Shortcut: open `WORKER/app` in Safari and tap **Share › Add to Home Screen**.
-It opens full screen with no browser bars, like an app.
-
-- Location comes from the browser (Safari asks for permission).
-- Free plan: a random device ID is created on first launch and kept in the app's storage, so the
-  4-a-day allowance counts per install. Deleting the app (or its website data) starts a new one.
-- Paid: tap **Token** and paste the token; it's kept on the device.
-- Paid passes auto-refresh every 30s while the app is open; every pass refreshes when you come back
-  to the app after more than a minute.
-- Icons are generated by `scripts/build-app-icons.py` into `worker/app-icons.js`.

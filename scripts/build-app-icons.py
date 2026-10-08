@@ -1,4 +1,4 @@
-"""Draws the BusNearby Home Screen icon and writes worker/app-icons.js (base64 PNGs).
+"""Draws the BusBoard Home Screen icon and writes worker/app-icons.js (base64 PNGs).
 
 Run from anywhere: python3 -I scripts/build-app-icons.py
 iOS rounds the corners itself, so the icon is a full square.
