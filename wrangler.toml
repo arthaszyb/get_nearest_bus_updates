@@ -9,6 +9,21 @@ keep_vars = true
 [triggers]
 crons = ["*/5 * * * *"]
 
+# Workers Logs and traces (dashboard › Workers › busnearby › Observability; kept up to 7 days).
+# The automatic per-request log is off because it records the full URL, which carries the
+# location (and, from older Shortcuts, the token); the Worker writes its own line per request instead.
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = false
+head_sampling_rate = 1
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+
 # If you already deployed this Worker via the Cloudflare dashboard and want to
 # manage it from the CLI instead, set `name` above to match your existing
 # Worker's name so `wrangler deploy` updates it in place.
@@ -28,8 +43,9 @@ binding = "DB"
 database_name = "bus-pro-db-001"
 database_id = "b1be8347-56ea-4246-814d-3cc3aa5e645e"
 
-# Optional: link shown to customers whose pass has expired or is about to, and the
-# iCloud link of the shared Shortcut, shown on the post-payment welcome page.
+# Optional: RENEW_URL replaces the built-in top-up page (/renew) as the link shown to customers
+# whose pass has expired or is about to — leave it unset to keep top-ups extending the same token.
+# SHORTCUT_URL is the iCloud link of the shared Shortcut, shown on the post-payment welcome page.
 # [vars]
 # RENEW_URL = "https://your-payment-link"
 # SHORTCUT_URL = "https://www.icloud.com/shortcuts/..."
@@ -37,7 +53,6 @@ database_id = "b1be8347-56ea-4246-814d-3cc3aa5e645e"
 # PAYMENT_LINK_YEARLY = "https://buy.stripe.com/..."
 # PAYMENT_LINK_MONTHLY_PROMO = "https://buy.stripe.com/..."
 # PAYMENT_LINK_YEARLY_PROMO = "https://buy.stripe.com/..."
-# MANAGE_URL = "https://billing.stripe.com/p/login/..."
 # SUPPORT_EMAIL = "hello@your-domain"
 
 # Secrets (LTA_API_KEY, ACCESS_TOKEN, ADMIN_SECRET, STRIPE_WEBHOOK_SECRET) are NOT set

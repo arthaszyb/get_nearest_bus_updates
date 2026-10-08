@@ -17,7 +17,13 @@ assert.match(html, /4 checks a day/);
 const script = html.match(/<script>([\s\S]*)<\/script>/)[1];
 assert.doesNotThrow(() => new Function(script), 'app script is valid JavaScript');
 assert.match(script, /'app:' \+ crypto\.randomUUID\(\)/);
-assert.match(script, /Couldn\\'t reach BusNearby/);
+assert.match(script, /Couldn\\'t reach BusBoard/);
+assert.match(script, /'x-device': device/, 'device ID goes in a header');
+assert.match(script, /headers\.authorization = 'Bearer ' \+ token/, 'token goes in a header');
+assert.ok(!/q\.set\('token'/.test(script) && !/device \}\)/.test(script), 'neither is put in the URL');
+assert.match(script, /beforeinstallprompt/);
+assert.match(script, /serviceWorker\.register\('\/sw\.js', \{ scope: '\/app' \}\)/);
+assert.match(script, /location\.hash/, 'takes a token handed over from the pass page');
 
 res = await get('/app.webmanifest');
 const manifest = await res.json();
@@ -32,6 +38,31 @@ for (const size of [180, 512]) {
   assert.deepEqual([...png.slice(1, 4)].map((c) => String.fromCharCode(c)).join(''), 'PNG');
   assert.equal(new DataView(png.buffer).getUint32(16), size, `icon is ${size}px wide`);
 }
+
+res = await get('/sw.js');
+assert.match(res.headers.get('content-type'), /javascript/);
+const sw = await res.text();
+assert.doesNotThrow(() => new Function(sw));
+assert.match(sw, /addEventListener\('fetch'/, 'Chrome needs a fetch handler to offer installing');
+
+// The per-request log line never carries the location, token or device
+const lines = [];
+const realLog = console.log;
+console.log = (line) => lines.push(line);
+const kv = new Map([['bus_stops_cache', JSON.stringify([{ BusStopCode: '28091', Description: 'Lakeside Stn', Latitude: 1.3442, Longitude: 103.721 }])]]);
+const withStops = { ...env, BUS_STOPS_KV: { get: async (k) => (kv.has(k) ? JSON.parse(kv.get(k)) : null), put: async () => {} } };
+globalThis.fetch = async () => new Response(JSON.stringify({ Services: [] }));
+await worker.fetch(new Request('https://x.dev/?lat=1.344211&lon=103.721987&format=html&device=Secret%20iPhone&token=sgb_secret'), withStops);
+await worker.fetch(new Request('https://x.dev/?lat=1.344211&lon=103.721987', { headers: { 'x-device': 'app:abc' } }), withStops);
+console.log = realLog;
+assert.equal(lines.length, 2);
+for (const line of lines) {
+  const entry = JSON.parse(line);
+  assert.equal(entry.path, '/');
+  assert.ok(!/1\.3442|103\.72|Secret|sgb_|app:abc/.test(line), `log line leaks nothing: ${line}`);
+}
+assert.equal(JSON.parse(lines[0]).access, 'denied');
+assert.deepEqual([JSON.parse(lines[1]).access, JSON.parse(lines[1]).stops], ['device', '28091']);
 
 // Without a DB (plain API deployment) there is no website, so no app either.
 res = await get('/app', { ...env, DB: undefined });

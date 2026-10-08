@@ -32,18 +32,20 @@ const SUBSCRIPTION_GRACE_DAYS = 2;
 const STRIPE_SIGNATURE_TOLERANCE_SECONDS = 300;
 
 // Website: landing page, pricing and free sign-up, served at / when there's no lat/lon or token.
-const PRODUCT_NAME = 'BusNearby';
+const PRODUCT_NAME = 'BusBoard';
 const CURRENCY = 'S$';
 // Launch prices show until this moment; afterwards the page switches to the regular prices and links.
 const PROMO_ENDS_AT = Date.parse('2026-11-30T23:59:59+08:00');
 // Prices here are for display only — customers are charged whatever their Stripe Payment Link is set to.
 // `link` names the env var holding the Payment Link; `${link}_PROMO` holds the launch-price one.
+// Passes are one-off payments (PayNow or card), not subscriptions: PayNow has no fixed fee, which
+// matters at these prices, and it can't do recurring payments. Customers top up to extend.
 const PAID_PLANS = [
   { plan: 'monthly', label: 'Monthly', per: 'month', price: 2.9, promoPrice: 1.9, link: 'PAYMENT_LINK_MONTHLY' },
   { plan: 'yearly', label: 'Yearly', per: 'year', price: 29.9, promoPrice: 18.9, link: 'PAYMENT_LINK_YEARLY' },
 ];
 const FREE_SIGNUPS_PER_NETWORK_PER_DAY = 3;
-const LEGAL_UPDATED = '7 Oct 2026';
+const LEGAL_UPDATED = '8 Oct 2026';
 
 const TEXT_HEADERS = { 'content-type': 'text/plain; charset=utf-8' };
 const HTML_HEADERS = { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' };
@@ -337,7 +339,7 @@ const encodeBytes = (bytes) => Array.from(bytes, (b) => TOKEN_ALPHABET[b & 31]).
 const randomString = (length) => encodeBytes(crypto.getRandomValues(new Uint8Array(length)));
 const newToken = () => `sgb_${randomString(32)}`; // 160 bits of randomness
 
-const bearer = (request) => request.headers.get('authorization')?.replace(/^Bearer\s+/i, '') || '';
+const bearer = (request) => request.headers.get('authorization')?.replace(/^Bearer\s*/i, '') || '';
 
 // Counts this request against the token and returns its row, in one round trip.
 // A token issued with startOnFirstUse gets its expiry fixed here, the first time it's used.
@@ -371,7 +373,8 @@ async function authorize(request, url, env, now) {
     return env.ACCESS_TOKEN ? { error: { status: 401, message: 'Unauthorized' } } : { owner: true };
   }
   if (!token) {
-    const device = url.searchParams.get('device')?.trim();
+    // The web app sends its device ID as a header; the Shortcut may use either.
+    const device = (request.headers.get('x-device') || url.searchParams.get('device'))?.trim();
     if (!device) return { error: { status: 401, message: 'Missing access token.' } };
     if (device.length > MAX_DEVICE_LENGTH) return { error: { status: 400, message: 'Invalid device.' } };
     return authorizeAnonymous(env, device, now);
@@ -385,7 +388,7 @@ async function authorize(request, url, env, now) {
     return { error: { status: 403, message: 'This access token has been disabled.' } };
   }
   if (pass.expires_at !== null && now >= pass.expires_at) {
-    return { error: { status: 402, message: `Your pass expired on ${formatDate(pass.expires_at)}.`, renew: 'Renew' } };
+    return { error: { status: 402, message: `Your pass expired on ${formatDate(pass.expires_at)}.`, renew: 'Renew', ref: pass.id } };
   }
   if (pass.daily_limit !== null && pass.usage_count > pass.daily_limit) {
     return {
@@ -393,6 +396,7 @@ async function authorize(request, url, env, now) {
         status: 429,
         message: `Daily limit of ${pass.daily_limit} requests reached. It resets at midnight (SGT).`,
         renew: pass.plan === 'free' ? 'Upgrade' : undefined,
+        ref: pass.id,
       },
     };
   }
@@ -649,6 +653,28 @@ async function checkoutToken(env, sessionId) {
 
 const stripeId = (value) => (typeof value === 'string' ? value : value?.id) ?? null;
 
+// A Payment Link opened from a pass's renew page carries ?client_reference_id=<token id>; that
+// purchase extends the pass (same token, from its expiry or now, whichever is later) instead of
+// issuing a new one. Returns true when the session is a top-up, already applied or applied now.
+async function topUpForCheckout(env, session, settings, now) {
+  const ref = session.client_reference_id;
+  if (!/^tk_[a-z0-9]+$/.test(ref || '') || settings.days === null) return false;
+  // One transaction: record the session (only for a live, dated pass), extend that pass once, mark it done.
+  await env.DB.batch([
+    env.DB.prepare(
+      `INSERT INTO topups (stripe_checkout_session, token_id, created_at)
+       SELECT ?1, id, ?3 FROM tokens WHERE id = ?2 AND status = 'active' AND expires_at IS NOT NULL
+       ON CONFLICT (stripe_checkout_session) DO NOTHING`
+    ).bind(session.id, ref, now),
+    env.DB.prepare(
+      `UPDATE tokens SET plan = ?2, daily_limit = ?3, expires_at = MAX(expires_at, ?4) + ?5
+       WHERE id = (SELECT token_id FROM topups WHERE stripe_checkout_session = ?1 AND applied = 0)`
+    ).bind(session.id, settings.plan, settings.dailyLimit, now, settings.days * DAY_MS),
+    env.DB.prepare('UPDATE topups SET applied = 1 WHERE stripe_checkout_session = ?1').bind(session.id),
+  ]);
+  return Boolean(await env.DB.prepare('SELECT 1 FROM topups WHERE stripe_checkout_session = ?1').bind(session.id).first());
+}
+
 async function issueForCheckout(env, session, livemode, now) {
   // The plan comes from metadata on the Payment Link (Stripe copies it onto each Checkout session),
   // so the customer can't pick a different plan than the one they paid for.
@@ -662,6 +688,7 @@ async function issueForCheckout(env, session, livemode, now) {
     // then issue this customer's token through the admin API.
     return new Response(`Checkout session ${session.id}: invalid metadata — ${settings.error}`, { status: 400 });
   }
+  if (await topUpForCheckout(env, session, settings, now)) return new Response('ok');
 
   await insertToken(env.DB, now, {
     ...settings,
@@ -727,6 +754,19 @@ async function handleWelcome(url, env, now) {
   }
   const page = (content, refresh) =>
     new Response(htmlPage(`<header><h1>Your pass</h1></header>\n${content}`, { refresh }), { headers: HTML_HEADERS });
+
+  const topUp = await env.DB.prepare(
+    `SELECT tokens.* FROM topups JOIN tokens ON tokens.id = topups.token_id WHERE topups.stripe_checkout_session = ?1`
+  )
+    .bind(sessionId)
+    .first();
+  if (topUp) {
+    return page(
+      `<div class="card pad"><p><b>Payment received — your pass is extended.</b></p>
+<p>It's now valid until <b>${formatDate(topUp.expires_at)}</b>. Nothing to change: keep using the same token.</p></div>
+<p class="muted small">${escapeHtml(capitalize(topUp.plan))} pass · ref ${escapeHtml(topUp.id)}</p>`
+    );
+  }
 
   const row = await env.DB.prepare('SELECT * FROM tokens WHERE stripe_checkout_session = ?1').bind(sessionId).first();
   if (!row) {
@@ -846,7 +886,7 @@ ${refresh ? `<meta http-equiv="refresh" content="${refresh}">\n` : ''}${head ? `
   .dest { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 13px; line-height: 1.25; }
   .dest b { font-weight: 600; overflow-wrap: anywhere; }
   .dest.solo { font-size: 16px; font-weight: 600; }
-  .mrt { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .mrt { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; color: var(--muted); font-size: 12px; }
   .ln { font-style: normal; font-weight: 700; font-size: 10px; color: #fff; border-radius: 4px; padding: 1px 4px; flex: none; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--line); }
   .dot.seats { background: var(--seats); }
@@ -1020,6 +1060,10 @@ const SITE_CSS = `
   .screen .stop h2 { color: #1c1c1e; }
   .screen .t.next { color: #1c1c1e; }
   .screen-title { font-size: 26px; font-weight: 700; margin: 4px 6px 12px; }
+  /* The mock screen is narrower than a phone: tighter columns leave room for the destination. */
+  .screen .row { grid-template-columns: 44px 60px 56px minmax(0, 1fr); column-gap: 6px; padding: 9px 10px; }
+  .screen .svc { min-width: 40px; padding: 3px 6px; }
+  .screen .stop { padding: 12px 10px 10px; }
   .grid { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
   .tile { background: var(--s-white); border-radius: 22px; padding: 30px 26px; box-shadow: 0 2px 20px rgba(0,0,0,.04); }
   .tile .icon { font-size: 34px; line-height: 1; margin-bottom: 18px; }
@@ -1063,8 +1107,8 @@ const navBar = (env) => `<nav class="nav"><div class="wrap">
   <a class="logo" href="/">${PRODUCT_NAME.replace(/^([A-Z][a-z]+)(.+)$/, '$1<span>$2</span>')}</a>
   <a class="link optional" href="/#features">Features</a>
   <a class="link" href="/#pricing">Pricing</a>
-  <a class="link optional" href="/install">Install</a>
-  <a class="pill small" href="${escapeHtml(env.SHORTCUT_URL || '/install')}">Try it free</a>
+  <a class="link optional" href="/install">Get it</a>
+  <a class="pill small" href="/app">Try it free</a>
 </div></nav>`;
 
 // A website page: glass nav, the content, footer. `bare` content brings its own full-width sections;
@@ -1081,7 +1125,6 @@ const sitePage = (env, now, content, title, { status = 200, bare = false } = {})
 
 function siteFooter(env, now) {
   const links = [
-    env.MANAGE_URL && `<a href="${escapeHtml(env.MANAGE_URL)}">Manage subscription</a>`,
     '<a href="/install">Install guide</a>',
     '<a href="/privacy">Privacy</a>',
     '<a href="/terms">Terms</a>',
@@ -1110,15 +1153,15 @@ function passPage(token, row, env, { revisitable }) {
   const button = env.SHORTCUT_URL
     ? `<button type="button" onclick="${copy}.finally(() => { location.href = ${escapeHtml(JSON.stringify(env.SHORTCUT_URL))}; })">Copy token &amp; open the Shortcut</button>`
     : `<button type="button" onclick="${copy}.then(() => { this.textContent = 'Copied ✓'; })">Copy token</button>`;
-  const steps = env.SHORTCUT_URL
-    ? `<li>Tap the button above — it copies your token and opens the Shortcut.</li>
-    <li>Tap <b>Add Shortcut</b> (or <b>Replace</b> if you already have it) and paste the token when it asks.</li>`
-    : `<li>Copy the token above.</li>
-    <li>Paste it into the Shortcut where it asks for your access token.</li>`;
+  const shortcutStep = env.SHORTCUT_URL
+    ? `<li><b>iPhone Shortcut:</b> tap the button above — it copies your token and opens the Shortcut. Tap <b>Add Shortcut</b> (or <b>Replace</b>) and paste the token when it asks.</li>`
+    : `<li><b>iPhone Shortcut:</b> paste the token where the Shortcut asks for your access token.</li>`;
+  const steps = `<li><b>Web app:</b> <a href="/app#token=${escapeHtml(encodeURIComponent(token))}">open ${PRODUCT_NAME} with this token</a>. If you've already added it to your Home Screen, open it from there, tap <b>Token</b> and paste.</li>
+    ${shortcutStep}`;
   const keep = revisitable
     ? 'Keep this page private: anyone with its link can see your token. You can come back to it if you lose the token.'
     : '<b>Save your token now</b> — for your security it can’t be shown again.';
-  const upgrade = row.plan === 'free' ? ' · <a href="/#pricing">Upgrade</a>' : '';
+  const upgrade = row.plan === 'free' ? ` · <a href="/renew?ref=${escapeHtml(row.id)}">Upgrade</a>` : '';
 
   return new Response(
     htmlPage(
@@ -1129,11 +1172,11 @@ function passPage(token, row, env, { revisitable }) {
   ${button}
 </div>
 <div class="card pad">
-  <h2>Set up on your iPhone</h2>
+  <h2>Start using it</h2>
   <ol>
     ${steps}
-    <li>Tap the Shortcut whenever you want to see the buses near you. <a href="/install">Install guide</a></li>
   </ol>
+  <p class="muted small" style="margin:8px 0 0"><a href="/install">Install guide</a></p>
 </div>
 <p class="muted small">${escapeHtml(capitalize(row.plan))} pass · ${validity}${limit} · ref ${escapeHtml(row.id)}${upgrade}<br>${keep}</p>`,
       { title: `Your ${PRODUCT_NAME} pass` }
@@ -1197,26 +1240,37 @@ const SAMPLE_STOPS = (() => {
   ];
 })();
 
-function renderLanding(env, now) {
+// A plan's Payment Link: the launch-price one while the offer runs (when set), else the regular one.
+// With `ref` (a token id), the purchase tops up that pass instead of issuing a new token.
+function planLink(env, p, promo, ref) {
+  const link = (promo && env[`${p.link}_PROMO`]) || env[p.link];
+  if (!link || !ref) return link;
+  const url = new URL(link);
+  url.searchParams.set('client_reference_id', ref);
+  return url.toString();
+}
+
+function planCards(env, now, ref) {
   const promo = now <= PROMO_ENDS_AT;
   const monthly = PAID_PLANS.find((p) => p.plan === 'monthly');
   const priceOf = (p) => (promo ? p.promoPrice : p.price);
-  const install = escapeHtml(env.SHORTCUT_URL || '/install');
-
-  const paidCards = PAID_PLANS.map((p) => {
-    const link = (promo && env[`${p.link}_PROMO`]) || env[p.link];
+  return PAID_PLANS.map((p) => {
+    const link = planLink(env, p, promo, ref);
     const savings = p.per === 'year' && monthly ? Math.round((1 - priceOf(p) / (priceOf(monthly) * 12)) * 100) : 0;
     return `<div class="plan glass${p.per === 'year' ? ' best' : ''}">
   <h3>${escapeHtml(p.label)}${savings > 0 ? ` <span class="tag">Save ${savings}%</span>` : ''}</h3>
   <div class="was">${promo ? money(p.price) : ''}</div>
   <div class="price">${money(priceOf(p))} <small>/ ${p.per}</small></div>
-  <ul><li>Up to ${PLANS[p.plan].dailyLimit} checks a day</li><li>Live arrivals and crowding</li><li>Cancel any time</li></ul>
-  ${link ? `<a class="pill" href="${escapeHtml(link)}">Subscribe</a>` : '<button class="pill" type="button" disabled>Coming soon</button>'}
+  <ul><li>Up to ${PLANS[p.plan].dailyLimit} checks a day</li><li>Pay once with PayNow or card</li><li>No auto-renewal — top up any time</li></ul>
+  ${link ? `<a class="pill" href="${escapeHtml(link)}">${ref ? 'Top up' : 'Buy'} with PayNow</a>` : '<button class="pill" type="button" disabled>Coming soon</button>'}
 </div>`;
   }).join('\n');
+}
 
+function renderLanding(env, now) {
+  const promo = now <= PROMO_ENDS_AT;
   const offer = promo
-    ? `<div class="offer glass"><b>Launch offer</b> — subscribe by ${formatDate(PROMO_ENDS_AT)} and keep the launch price for as long as you stay subscribed.</div>`
+    ? `<div class="offer glass"><b>Launch prices</b> — until ${formatDate(PROMO_ENDS_AT)}.</div>`
     : '';
 
   return sitePage(
@@ -1225,9 +1279,9 @@ function renderLanding(env, now) {
     `<section class="dark hero center">
   <div class="wrap">
     <p class="eyebrow">Live bus arrivals · Singapore</p>
-    <h1 class="headline">Which bus is coming?<br>One tap.</h1>
-    <p class="lede">${PRODUCT_NAME} finds the stops nearest you — both sides of the road — and shows live arrival times and how full each bus is. No app. No stop codes.</p>
-    <div class="ctas"><a class="pill" href="${install}">Try it free</a><a class="pill ghost" href="#pricing">See pricing</a></div>
+    <h1 class="headline">The bus stop display.<br>In your pocket.</h1>
+    <p class="lede">${PRODUCT_NAME} shows what the screen at the bus stop shows — every bus, when it's coming, how full it is and where it's going — for the stops around you, on both sides of the road. Nothing to install.</p>
+    <div class="ctas"><a class="pill" href="/app">Open ${PRODUCT_NAME}</a><a class="pill ghost" href="#pricing">See pricing</a></div>
     <div class="phone" aria-label="Example of what you see">
       <div class="screen">
         <div class="screen-title">Nearby buses</div>
@@ -1244,8 +1298,8 @@ function renderLanding(env, now) {
     <div class="grid">
       <div class="tile"><div class="icon">📍</div><h3>Both sides of the road</h3><p>The three closest stops, so the one across the street is covered too.</p></div>
       <div class="tile"><div class="icon">🟢</div><h3>Know if there's a seat</h3><p>Every bus shows whether it has seats, standing room, or is packed.</p></div>
-      <div class="tile"><div class="icon">⚡</div><h3>Nothing to search</h3><p>It works out where you are. No stop codes, no maps, no menus.</p></div>
-      <div class="tile"><div class="icon">🔒</div><h3>No account, no tracking</h3><p>Your location is used for the lookup and never stored.</p></div>
+      <div class="tile"><div class="icon">🚇</div><h3>Where it's heading</h3><p>Each service shows its destination and the next MRT stations on the way.</p></div>
+      <div class="tile"><div class="icon">⚡</div><h3>No app store, no account</h3><p>Open it in your phone's browser and add it to your Home Screen. Your location is never stored.</p></div>
     </div>
   </div>
 </section>
@@ -1253,11 +1307,11 @@ function renderLanding(env, now) {
 <section class="light band" style="padding-top:0">
   <div class="wrap">
     <h2 class="title center">Ready in a minute.</h2>
-    <p class="lede center light">No sign-up. No app store. It's a Shortcut.</p>
+    <p class="lede center light">iPhone or Android. No sign-up.</p>
     <div class="steps3">
-      <div><h3>Add the Shortcut</h3><p>Tap <a href="${install}">Try it free</a> on your iPhone, then Add Shortcut. That's the whole setup.</p></div>
-      <div><h3>Tap it</h3><p>From your Home Screen, a widget, Siri or the Action button. ${ANONYMOUS_DAILY_LIMIT} checks a day are free.</p></div>
-      <div><h3>Need more?</h3><p>Subscribe below and paste your token into the Shortcut. Done.</p></div>
+      <div><h3>Open it</h3><p>Tap <a href="/app">Open ${PRODUCT_NAME}</a> on your phone and allow location. ${ANONYMOUS_DAILY_LIMIT} checks a day are free.</p></div>
+      <div><h3>Add to Home Screen</h3><p>It then opens full screen, like an app. iPhone: Share › Add to Home Screen. Android: Install app.</p></div>
+      <div><h3>On iPhone, go further</h3><p>Add the <a href="/install#shortcut">${PRODUCT_NAME} Shortcut</a> to check from Siri, a widget or the Action button.</p></div>
     </div>
   </div>
 </section>
@@ -1265,71 +1319,96 @@ function renderLanding(env, now) {
 <section class="dark band center" id="pricing">
   <div class="wrap">
     <h2 class="title">Simple pricing.</h2>
-    <p class="lede">Free every day. Upgrade when four checks aren't enough.</p>
+    <p class="lede">Free every day. Top up when four checks aren't enough.</p>
     ${offer}
     <div class="plans">
       <div class="plan glass">
         <h3>Free</h3>
         <div class="was"></div>
         <div class="price">${CURRENCY}0</div>
-        <ul><li>${ANONYMOUS_DAILY_LIMIT} checks a day</li><li>Built in — no sign-up, no token</li><li>Just add the Shortcut and tap</li></ul>
-        <a class="pill ghost" href="${install}">Get free pass</a>
+        <ul><li>${ANONYMOUS_DAILY_LIMIT} checks a day</li><li>Built in — no sign-up, no token</li><li>iPhone and Android</li></ul>
+        <a class="pill ghost" href="/app">Get free pass</a>
         <p class="note">Free is on by default — you don't need a pass to use it.</p>
       </div>
-      ${paidCards}
+      ${planCards(env, now)}
     </div>
-    <p class="fine">Prices in SGD. Subscriptions renew automatically until cancelled. Runs as an Apple Shortcut on iPhone, or as a <a href="/app">Home Screen web app</a>.</p>
+    <p class="fine">Prices in SGD. One-off payments by PayNow or card — passes never renew or charge you automatically. Runs in any modern phone browser; on iPhone it can also run as a Shortcut.</p>
   </div>
 </section>`,
-    `${PRODUCT_NAME} — live bus arrivals near you, in one tap`,
+    `${PRODUCT_NAME} — the bus stop display, in your pocket`,
+    { bare: true }
+  );
+}
+
+// Where a pass's "Renew" / "Upgrade" link goes: the paid plans, as top-ups of that pass.
+function renderRenew(env, now, url) {
+  const ref = url.searchParams.get('ref');
+  if (!/^tk_[a-z0-9]+$/.test(ref || '')) return Response.redirect(`${url.origin}/#pricing`, 302);
+  return sitePage(
+    env,
+    now,
+    `<section class="dark band center">
+  <div class="wrap">
+    <h2 class="title">Top up your pass.</h2>
+    <p class="lede">Pay once with PayNow or card. Your pass is extended from its current end date — keep using the same token, nothing to change.</p>
+    <div class="plans">${planCards(env, now, ref)}</div>
+    <p class="fine">Pass ref ${escapeHtml(ref)} · Prices in SGD · Passes never renew or charge you automatically.</p>
+  </div>
+</section>`,
+    `Top up — ${PRODUCT_NAME}`,
     { bare: true }
   );
 }
 
 function renderInstall(env, now) {
-  const add = env.SHORTCUT_URL
-    ? `<a class="pill" href="${escapeHtml(env.SHORTCUT_URL)}">Add ${PRODUCT_NAME} to iPhone</a>`
+  const shortcut = env.SHORTCUT_URL
+    ? `<a class="pill" href="${escapeHtml(env.SHORTCUT_URL)}">Add the ${PRODUCT_NAME} Shortcut</a>`
     : '<button class="pill" type="button" disabled>Coming soon</button>';
   return sitePage(
     env,
     now,
     `<article class="legal">
-  <h1 class="title">Install ${PRODUCT_NAME}</h1>
-  <p>${PRODUCT_NAME} runs as an Apple Shortcut on your iPhone. Setup takes under a minute and needs no account.</p>
-  <p style="margin:24px 0 8px">${add}</p>
+  <h1 class="title">Get ${PRODUCT_NAME}</h1>
+  <p>${PRODUCT_NAME} runs in your phone's browser — nothing to download, no account. Add it to your Home Screen and it opens full screen, like an app.</p>
+  <p style="margin:24px 0 8px"><a class="pill" href="/app">Open ${PRODUCT_NAME}</a></p>
 
-  <h2>1. Add the Shortcut</h2>
-  <p>On your iPhone, tap the button above. The Shortcuts app opens; tap <b>Add Shortcut</b>.</p>
+  <h2>On iPhone</h2>
+  <ol>
+    <li>Open <a href="/app">${PRODUCT_NAME}</a> in <b>Safari</b> and allow location when asked.</li>
+    <li>Tap <b>Share</b> › <b>Add to Home Screen</b> › <b>Add</b>.</li>
+    <li>Open it from the Home Screen from now on — full screen, no browser bars.</li>
+  </ol>
 
-  <h2>2. Access token: leave it empty, or paste yours</h2>
-  <p>It asks for an access token. <b>Leave it empty to use the free plan</b> — ${ANONYMOUS_DAILY_LIMIT} checks a day, nothing to sign up for. If you've subscribed, paste the token from the page you saw after paying.</p>
+  <h2>On Android</h2>
+  <ol>
+    <li>Open <a href="/app">${PRODUCT_NAME}</a> in <b>Chrome</b> and allow location when asked.</li>
+    <li>Tap <b>Install</b> in the app, or Chrome's <b>⋮</b> menu › <b>Install app</b> (or <b>Add to Home screen</b>).</li>
+    <li>It appears with your other apps and opens full screen.</li>
+  </ol>
 
-  <h2>3. Run it once and allow access</h2>
-  <p>Tap the Shortcut. The first time, iOS asks to use your location and to connect to ${PRODUCT_NAME}'s server — tap <b>Allow</b> (or <b>Always Allow</b>) for both. After that it opens straight to the buses near you.</p>
+  <h2>Free, or your pass</h2>
+  <p>It's free for ${ANONYMOUS_DAILY_LIMIT} checks a day, with nothing to set up. If you've bought a pass, tap <b>Token</b> in the app and paste the token from the page you saw after paying.</p>
 
-  <h2>4. Keep it one tap away</h2>
-  <ul>
-    <li><b>Home Screen:</b> in Shortcuts, touch and hold ${PRODUCT_NAME} › Share › Add to Home Screen.</li>
-    <li><b>Widget:</b> add a Shortcuts widget to your Home Screen or Lock Screen and pick ${PRODUCT_NAME}.</li>
-    <li><b>Action button</b> (iPhone 15 Pro and later): Settings › Action Button › Shortcut › ${PRODUCT_NAME}.</li>
-    <li><b>Siri:</b> say "Hey Siri, ${PRODUCT_NAME}".</li>
-  </ul>
+  <h2 id="shortcut">iPhone extra: the Shortcut</h2>
+  <p>The Shortcut shows the same display, and lets you check from <b>Siri</b> ("Hey Siri, ${PRODUCT_NAME}"), a <b>widget</b>, or the <b>Action button</b> (Settings › Action Button › Shortcut).</p>
+  <p style="margin:16px 0 8px">${shortcut}</p>
+  <ol>
+    <li>Tap the button on your iPhone, then <b>Add Shortcut</b>.</li>
+    <li>When it asks for an access token, <b>leave it empty for the free plan</b>, or paste your token.</li>
+    <li>Run it once and tap <b>Allow</b> for location and for connecting to ${PRODUCT_NAME}.</li>
+  </ol>
 
-  <h2>No Shortcuts? Use the web app</h2>
-  <p>Open <a href="/app">${PRODUCT_NAME} web app</a> in Safari, tap <b>Share</b> › <b>Add to Home Screen</b>, and allow location when asked. It opens full screen like an app. Subscribers tap <b>Token</b> in the app and paste their token.</p>
-
-  <h2>Upgrading later</h2>
-  <p>Pick a plan on the <a href="/#pricing">pricing page</a>. After paying, tap <b>Copy token &amp; open the Shortcut</b>, choose <b>Replace</b>, and paste the token when asked.</p>
+  <h2>Topping up</h2>
+  <p>Pick a plan on the <a href="/#pricing">pricing page</a> and pay with PayNow or card. When a pass is about to end, the display shows a <b>Renew</b> link: paying through it extends the same pass, so there's nothing to change in the app or Shortcut.</p>
 
   <h2>If something's off</h2>
   <ul>
-    <li><b>"You've used today's ${ANONYMOUS_DAILY_LIMIT} free checks"</b> — the free plan resets at midnight, or <a href="/#pricing">upgrade</a>.</li>
-    <li><b>It can't find your location</b> — Settings › Privacy &amp; Security › Location Services › Shortcuts › While Using the App.</li>
-    <li><b>"Invalid access token"</b> — re-add the Shortcut from the button above and paste the token again, or leave it empty for the free plan.</li>
-    <li><b>The link opens a web page instead of the Shortcuts app</b> — open it on your iPhone, in Safari.</li>
+    <li><b>"You've used today's ${ANONYMOUS_DAILY_LIMIT} free checks"</b> — the free plan resets at midnight, or <a href="/#pricing">get a pass</a>.</li>
+    <li><b>It can't find your location</b> — iPhone: Settings › Privacy &amp; Security › Location Services › Safari Websites (or Shortcuts) › While Using. Android: tap the icon left of the address in Chrome › Permissions › Location.</li>
+    <li><b>"Invalid access token"</b> — paste the token again (Token in the app; re-add the Shortcut), or clear it to use the free plan.</li>
   </ul>
 </article>`,
-    `Install — ${PRODUCT_NAME}`
+    `Get ${PRODUCT_NAME}`
   );
 }
 
@@ -1345,18 +1424,19 @@ function renderPrivacy(env, now) {
 
   <h2>What we collect and why</h2>
   <ul>
-    <li><b>Your location, at the moment you check.</b> Used to find the nearest bus stops, then discarded. It is not saved by the service. Only bus stop codes are sent on to the Land Transport Authority.</li>
-    <li><b>Your email address and Stripe customer and subscription IDs</b>, if you buy a plan. Used to run your subscription, renew or end your pass, and answer support requests.</li>
+    <li><b>Your location, at the moment you check.</b> Used to find the nearest bus stops. We don't save it in our database. Our host's technical logs and traces of requests, kept for up to 7 days to fix problems, may include it. Only bus stop codes are sent on to the Land Transport Authority.</li>
+    <li><b>Your email address and Stripe payment IDs</b>, if you buy a pass. Used to issue or extend your pass and answer support requests.</li>
     <li><b>Usage counts for your pass</b> — how many checks today and in total, and when it was last used. Used to apply the daily limit and to stop passes being shared.</li>
-    <li><b>A one-way code derived from your device's details</b> (its name, model, iOS version and screen size), if you use the free tier without a token. The Shortcut sends these details; we keep only the code and a count of today's checks, to apply the free daily limit. The details themselves aren't stored.</li>
+    <li><b>A one-way code derived from a device identifier</b>, if you use the free tier without a token: a random ID the web app creates and keeps on your phone, or, for the iPhone Shortcut, your device's details (name, model, iOS version and screen size). We keep only the code and a count of today's checks, to apply the free daily limit.</li>
+    <li><b>Your token, if you paste one into the web app</b>, is kept on your phone only, to send with each check.</li>
     <li><b>A one-way, daily-changing code derived from your network address</b>, if you get a free pass. Used only to limit how many free passes one network can create in a day; it can't be turned back into your address.</li>
   </ul>
-  <p>Payment card details go directly to Stripe and never reach us.</p>
+  <p>Card and PayNow payment details go directly to Stripe and never reach us.</p>
 
   <h2>Who processes it</h2>
   <ul>
     <li><b>Cloudflare</b> hosts the service and its database.</li>
-    <li><b>Stripe</b> handles payments and subscriptions.</li>
+    <li><b>Stripe</b> handles payments (PayNow and cards).</li>
     <li><b>Land Transport Authority (LTA DataMall)</b> provides arrival times. It receives bus stop codes, not your location.</li>
   </ul>
 
@@ -1389,12 +1469,12 @@ function renderTerms(env, now) {
     <li>We may disable a pass that is used to overload or misuse the service.</li>
   </ul>
 
-  <h2>Payments and cancellation</h2>
+  <h2>Payments</h2>
   <ul>
-    <li>Paid plans are subscriptions billed in advance by Stripe and renew automatically until cancelled.</li>
-    <li>You can cancel any time; your pass keeps working until the end of the period you've paid for.</li>
+    <li>Passes are one-off payments, made by PayNow or card through Stripe. They don't renew or charge you automatically.</li>
+    <li>A pass runs for the period you paid for. Topping up through your pass's Renew link adds that period to it, starting when the current one ends.</li>
     <li>Payments aren't refunded for partly used periods, except where the law requires it.</li>
-    <li>If we change prices, we'll tell existing subscribers before the change applies to them.</li>
+    <li>Price changes apply to purchases made after the change, never to a pass you've already paid for.</li>
   </ul>
 
   <h2>Liability</h2>
@@ -1422,6 +1502,7 @@ const APP_CSS = `
   #status { text-align: center; color: var(--muted); padding: 40px 16px; }
   #content.loading { opacity: .55; transition: opacity .2s; }
   .hint { padding: 12px 16px; font-size: 14px; line-height: 1.4; }
+  .hint button { margin-top: 10px; padding: 9px; }
   dialog { border: 0; border-radius: 16px; padding: 18px; width: min(92vw, 420px); background: var(--card); color: var(--text); }
   dialog::backdrop { background: rgba(0, 0, 0, .4); }
   dialog h2 { font-size: 19px; margin: 0 0 6px; }
@@ -1442,11 +1523,36 @@ const APP_SCRIPT = `
   };
   let device = store.get('busnearby.device');
   if (!device) { device = 'app:' + crypto.randomUUID(); store.set('busnearby.device', device); }
+  // The pass page links here with #token=…: keep it, then drop it from the address.
+  const handoff = new URLSearchParams(location.hash.slice(1)).get('token');
+  if (handoff) { store.set('busnearby.token', handoff.trim()); history.replaceState(null, '', location.pathname); }
 
   const $ = (id) => document.getElementById(id);
   const content = $('content'), status = $('status'), updated = $('updated');
   const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
-  if (!standalone) $('install').hidden = false;
+  const ios = /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  if (!standalone) {
+    $('install-text').innerHTML = ios
+      ? 'Add ${PRODUCT_NAME} to your Home Screen for a full-screen app: tap <b>Share</b> › <b>Add to Home Screen</b>.'
+      : 'Install ${PRODUCT_NAME} for a full-screen app: open your browser menu › <b>Install app</b> (or <b>Add to Home screen</b>).';
+    $('install').hidden = false;
+  }
+  // Chrome on Android offers its own install prompt; show it as a button.
+  let installPrompt;
+  addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    installPrompt = e;
+    $('install-text').textContent = 'Install ${PRODUCT_NAME} for a full-screen app on your Home Screen.';
+    $('install-btn').hidden = false;
+  });
+  $('install-btn').onclick = async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    if ((await installPrompt.userChoice).outcome === 'accepted') $('install').hidden = true;
+    installPrompt = null;
+  };
+  addEventListener('appinstalled', () => { $('install').hidden = true; });
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js', { scope: '/app' }).catch(() => {});
 
   let timer, lastLoad = 0, busy = false;
   const say = (msg) => { status.textContent = msg; status.hidden = !msg; };
@@ -1466,10 +1572,12 @@ const APP_SCRIPT = `
     if (!content.childElementCount) say('Finding buses near you…');
     try {
       const pos = await locate();
-      const q = new URLSearchParams({ lat: pos.coords.latitude.toFixed(6), lon: pos.coords.longitude.toFixed(6), format: 'html', device });
+      const q = new URLSearchParams({ lat: pos.coords.latitude.toFixed(6), lon: pos.coords.longitude.toFixed(6), format: 'html' });
+      // Token and device ID go in headers, so they stay out of request logs.
+      const headers = { 'x-device': device };
       const token = store.get('busnearby.token');
-      if (token) q.set('token', token);
-      const res = await fetch('/?' + q, { cache: 'no-store' });
+      if (token) headers.authorization = 'Bearer ' + token;
+      const res = await fetch('/?' + q, { cache: 'no-store', headers });
       const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
       doc.querySelector('header')?.remove();
       content.replaceChildren(...doc.body.children);
@@ -1515,7 +1623,7 @@ function renderApp() {
   return new Response(
     htmlPage(
       `<header><h1>Nearby buses</h1><div class="tools"><button id="updated" type="button">↻</button><button id="open-settings" type="button" aria-label="Settings">Token</button></div></header>
-<div id="install" class="card notice hint" hidden>Add ${PRODUCT_NAME} to your Home Screen for a full-screen app: tap <b>Share</b> › <b>Add to Home Screen</b>.</div>
+<div id="install" class="card notice hint" hidden><span id="install-text"></span><button id="install-btn" type="button" hidden>Install</button></div>
 <p id="status">Finding buses near you…</p>
 <main id="content"></main>
 <dialog id="settings">
@@ -1552,6 +1660,18 @@ function appManifest() {
   );
 }
 
+// Lets Chrome on Android offer "Install app" (its install prompt needs a fetch handler), and shows
+// the app shell when offline instead of the browser's error page. Data requests aren't touched.
+const APP_SERVICE_WORKER = `const SHELL = 'shell-v1';
+self.addEventListener('install', (e) => { self.skipWaiting(); e.waitUntil(caches.open(SHELL).then((c) => c.add('/app'))); });
+self.addEventListener('activate', (e) => e.waitUntil(
+  caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== SHELL).map((k) => caches.delete(k)))).then(() => self.clients.claim())
+));
+self.addEventListener('fetch', (e) => {
+  if (e.request.mode === 'navigate') e.respondWith(fetch(e.request).catch(() => caches.match('/app')));
+});
+`;
+
 const appIcon = (b64) =>
   new Response(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)), {
     headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=604800' },
@@ -1563,88 +1683,121 @@ export default {
     ctx.waitUntil(refreshRoutesStep(env, Date.now()));
   },
 
+  // One structured log line per request (Workers Logs; see [observability] in wrangler.toml). It never
+  // includes the location, token or device: the automatic per-request log, which would carry the
+  // URL with all three, is switched off there.
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const now = Date.now();
-
-    if (url.pathname.startsWith('/admin/')) return handleAdmin(request, url, env, now);
-    if (url.pathname === '/stripe/webhook' && request.method === 'POST') return handleStripeWebhook(request, env, now);
-    if (url.pathname === '/welcome') return handleWelcome(url, env, now);
-    if (url.pathname === '/free' && request.method === 'POST') return handleFreeSignup(request, env, now);
-    // The website is only for deployments that sell passes (DB bound); otherwise / stays a plain API.
-    if (env.DB && request.method === 'GET') {
-      const isApiCall = url.searchParams.has('lat') || url.searchParams.has('token') || request.headers.has('authorization');
-      if (url.pathname === '/' && !isApiCall) return renderLanding(env, now);
-      if (url.pathname === '/privacy') return renderPrivacy(env, now);
-      if (url.pathname === '/terms') return renderTerms(env, now);
-      if (url.pathname === '/install') return renderInstall(env, now);
-      if (url.pathname === '/app') return renderApp();
-      if (url.pathname === '/app.webmanifest') return appManifest();
-      if (url.pathname === '/app-icon-180.png') return appIcon(APP_ICON_180);
-      if (url.pathname === '/app-icon-512.png') return appIcon(APP_ICON_512);
-    }
-
-    const format = url.searchParams.get('format');
-    // Where expired and free passes are sent to renew or upgrade: your own link, or the pricing section.
-    const renewUrl = env.RENEW_URL || `${url.origin}/#pricing`;
-    const access = await authorize(request, url, env, now);
-    if (access.error) return renderError(access.error, format, renewUrl);
-
-    const lat = parseFloat(url.searchParams.get('lat'));
-    const lon = parseFloat(url.searchParams.get('lon'));
-    if (isNaN(lat) || isNaN(lon)) {
-      return new Response('Missing lat/lon', { status: 400 });
-    }
-
-    const ACCOUNT_KEY = env.LTA_API_KEY; // set this in Worker Settings > Variables
-    const headers = { AccountKey: ACCOUNT_KEY, accept: 'application/json' };
-
-    // Only the owner can force a full re-fetch of the stop list — it's 12 LTA calls and a KV write.
-    const forceRefresh = access.owner === true && url.searchParams.get('refresh') === '1';
-    const allStops = await getAllStops(env, headers, forceRefresh);
-
-    if (allStops.length === 0) {
-      return new Response('Could not load bus stop list — check LTA_API_KEY', { status: 502 });
-    }
-
-    // Nearest few stops (covers both directions of a road / an intersection)
-    const nearest = allStops
-      .map((s) => ({ ...s, d: dist(lat, lon, s.Latitude, s.Longitude) }))
-      .sort((a, b) => a.d - b.d)
-      .slice(0, NEAREST_STOPS);
-
-    const routesPromise = getRoutes(env);
-    const arrivals = await Promise.all(
-      nearest.map((s) =>
-        fetchLta(`v3/BusArrival?BusStopCode=${s.BusStopCode}`, headers, (b) => Array.isArray(b.Services))
-      )
-    );
-
-    const routes = await routesPromise;
-    ctx?.waitUntil(refreshRoutesStep(env, now, routes));
-    const stopsByCode = new Map(allStops.map((s) => [s.BusStopCode, s]));
-    const stops = nearest.map((stop, i) => toStopModel(stop, arrivals[i], now, { routes, stopsByCode }));
-    const pass = access.pass;
-    const warning = expiryWarning(pass, now);
-
-    switch (format) {
-      case 'html':
-        return new Response(renderHtml(stops, now, { pass, warning, renewUrl: warning && renewUrl }), {
-          headers: HTML_HEADERS,
-        });
-      case 'json':
-        return Response.json({
-          updatedAt: new Date(now).toISOString(),
-          pass: pass && {
-            plan: pass.plan,
-            expiresAt: isoOrNull(pass.expires_at),
-            dailyLimit: pass.daily_limit,
-            usedToday: pass.usage_count,
-          },
-          stops,
-        });
-      default:
-        return new Response(renderText(stops, warning, warning && renewUrl), { headers: TEXT_HEADERS });
+    const started = Date.now();
+    const log = { method: request.method, path: new URL(request.url).pathname };
+    try {
+      const response = await handleFetch(request, env, ctx, log);
+      log.status = response.status;
+      return response;
+    } catch (err) {
+      log.status = 500;
+      log.error = String(err?.stack || err);
+      return new Response('Something went wrong. Please try again.', { status: 500, headers: TEXT_HEADERS });
+    } finally {
+      log.ms = Date.now() - started;
+      (log.error ? console.error : console.log)(JSON.stringify(log));
     }
   },
 };
+
+async function handleFetch(request, env, ctx, log) {
+  const url = new URL(request.url);
+  const now = Date.now();
+
+  if (url.pathname.startsWith('/admin/')) return handleAdmin(request, url, env, now);
+  if (url.pathname === '/stripe/webhook' && request.method === 'POST') return handleStripeWebhook(request, env, now);
+  if (url.pathname === '/welcome') return handleWelcome(url, env, now);
+  if (url.pathname === '/free' && request.method === 'POST') return handleFreeSignup(request, env, now);
+  // The website is only for deployments that sell passes (DB bound); otherwise / stays a plain API.
+  if (env.DB && request.method === 'GET') {
+    const isApiCall = url.searchParams.has('lat') || url.searchParams.has('token') || request.headers.has('authorization');
+    if (url.pathname === '/' && !isApiCall) return renderLanding(env, now);
+    if (url.pathname === '/privacy') return renderPrivacy(env, now);
+    if (url.pathname === '/terms') return renderTerms(env, now);
+    if (url.pathname === '/install') return renderInstall(env, now);
+    if (url.pathname === '/renew') return renderRenew(env, now, url);
+    if (url.pathname === '/app') return renderApp();
+    if (url.pathname === '/app.webmanifest') return appManifest();
+    if (url.pathname === '/sw.js') {
+      return new Response(APP_SERVICE_WORKER, { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache' } });
+    }
+    if (url.pathname === '/app-icon-180.png') return appIcon(APP_ICON_180);
+    if (url.pathname === '/app-icon-512.png') return appIcon(APP_ICON_512);
+  }
+
+  const format = url.searchParams.get('format');
+  const access = await authorize(request, url, env, now);
+  log.format = format || 'text';
+  log.access = access.error ? 'denied' : access.owner ? 'owner' : access.pass?.id ? 'token' : 'device';
+  if (access.pass) log.plan = access.pass.plan;
+  if (access.error) log.reason = access.error.message;
+  if (access.error?.ref ?? access.pass?.id) log.ref = access.error?.ref ?? access.pass?.id; // token id, not the token
+  // Where passes are sent to renew or upgrade: your own link, the pass's top-up page (paying there
+  // extends the same token), or the pricing section for the free tier.
+  const ref = access.error?.ref ?? access.pass?.id;
+  const renewUrl = env.RENEW_URL || (ref ? `${url.origin}/renew?ref=${ref}` : `${url.origin}/#pricing`);
+  if (access.error) return renderError(access.error, format, renewUrl);
+
+  const lat = parseFloat(url.searchParams.get('lat'));
+  const lon = parseFloat(url.searchParams.get('lon'));
+  if (isNaN(lat) || isNaN(lon)) {
+    return new Response('Missing lat/lon', { status: 400 });
+  }
+
+  const ACCOUNT_KEY = env.LTA_API_KEY; // set this in Worker Settings > Variables
+  const headers = { AccountKey: ACCOUNT_KEY, accept: 'application/json' };
+
+  // Only the owner can force a full re-fetch of the stop list — it's 12 LTA calls and a KV write.
+  const forceRefresh = access.owner === true && url.searchParams.get('refresh') === '1';
+  const allStops = await getAllStops(env, headers, forceRefresh);
+
+  if (allStops.length === 0) {
+    return new Response('Could not load bus stop list — check LTA_API_KEY', { status: 502 });
+  }
+
+  // Nearest few stops (covers both directions of a road / an intersection)
+  const nearest = allStops
+    .map((s) => ({ ...s, d: dist(lat, lon, s.Latitude, s.Longitude) }))
+    .sort((a, b) => a.d - b.d)
+    .slice(0, NEAREST_STOPS);
+
+  const routesPromise = getRoutes(env);
+  const arrivals = await Promise.all(
+    nearest.map((s) =>
+      fetchLta(`v3/BusArrival?BusStopCode=${s.BusStopCode}`, headers, (b) => Array.isArray(b.Services))
+    )
+  );
+
+  const routes = await routesPromise;
+  ctx?.waitUntil(refreshRoutesStep(env, now, routes));
+  const stopsByCode = new Map(allStops.map((s) => [s.BusStopCode, s]));
+  const stops = nearest.map((stop, i) => toStopModel(stop, arrivals[i], now, { routes, stopsByCode }));
+  log.stops = stops.map((stop) => stop.code).join(',');
+  log.services = stops.reduce((n, stop) => n + stop.services.length, 0);
+  const pass = access.pass;
+  const warning = expiryWarning(pass, now);
+
+  switch (format) {
+    case 'html':
+      return new Response(renderHtml(stops, now, { pass, warning, renewUrl: warning && renewUrl }), {
+        headers: HTML_HEADERS,
+      });
+    case 'json':
+      return Response.json({
+        updatedAt: new Date(now).toISOString(),
+        pass: pass && {
+          plan: pass.plan,
+          expiresAt: isoOrNull(pass.expires_at),
+          dailyLimit: pass.daily_limit,
+          usedToday: pass.usage_count,
+        },
+        stops,
+      });
+    default:
+      return new Response(renderText(stops, warning, warning && renewUrl), { headers: TEXT_HEADERS });
+  }
+}

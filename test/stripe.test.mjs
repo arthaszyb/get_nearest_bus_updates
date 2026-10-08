@@ -186,3 +186,44 @@ assert.equal(await busStatus(sub2Token), 402);
 // Events for subscriptions we don't know are acknowledged and ignored
 assert.equal((await deliver(event('invoice.paid', invoiceNew('sub_unknown', clock + DAY)))).status, 200);
 assert.equal((await deliver(event('customer.subscription.deleted', { id: 'sub_unknown', ended_at: periodEnd(clock) }))).status, 200);
+
+// --- PayNow top-ups: a Payment Link opened from /renew?ref=<token id> extends that pass ---
+clock = Date.parse('2026-10-08T01:00:00Z');
+await deliver(event('checkout.session.completed', checkout('cs_live_month', { metadata: { plan: 'monthly' } })));
+const monthToken = await tokenFromWelcome('cs_live_month');
+const monthRow = rowFor('cs_live_month');
+assert.equal(monthRow.expires_at, clock + 31 * DAY);
+const tokensBefore = count();
+
+// Topping up early adds a month to the current end date, on the same token
+clock += 20 * DAY;
+const topUp = checkout('cs_live_topup1', { metadata: { plan: 'monthly' }, client_reference_id: monthRow.id });
+assert.equal((await deliver(event('checkout.session.completed', topUp))).status, 200);
+assert.equal(rowFor('cs_live_month').expires_at, monthRow.expires_at + 31 * DAY);
+assert.equal(count(), tokensBefore, 'no new token');
+// Stripe redelivering the same session doesn't extend twice
+await deliver(event('checkout.session.completed', topUp));
+await deliver(event('checkout.session.async_payment_succeeded', topUp));
+assert.equal(rowFor('cs_live_month').expires_at, monthRow.expires_at + 31 * DAY);
+let page = await (await welcome('cs_live_topup1')).text();
+assert.match(page, /your pass is extended/);
+assert.match(page, /valid until <b>9 Dec 2026<\/b>/);
+assert.ok(!page.includes(monthToken), 'the top-up page never shows the token');
+
+// After it has expired, a top-up (here yearly) starts from now and switches the plan
+clock = monthRow.expires_at + 31 * DAY + 5 * DAY;
+assert.equal(await busStatus(monthToken), 402);
+await deliver(event('checkout.session.completed', checkout('cs_live_topup2', { metadata: { plan: 'yearly' }, client_reference_id: monthRow.id })));
+const renewed = rowFor('cs_live_month');
+assert.equal(renewed.expires_at, clock + 366 * DAY);
+assert.equal(renewed.plan, 'yearly');
+assert.equal(await busStatus(monthToken), 200);
+
+// A reference to no pass (or a lifetime / disabled one) falls back to issuing a new token
+await deliver(event('checkout.session.completed', checkout('cs_live_unknownref', { metadata: { plan: 'monthly' }, client_reference_id: 'tk_nosuchpass' })));
+assert.ok(rowFor('cs_live_unknownref'), 'new token issued');
+assert.ok(await tokenFromWelcome('cs_live_unknownref'));
+sqlite.prepare("UPDATE tokens SET status = 'disabled' WHERE id = ?").run(monthRow.id);
+await deliver(event('checkout.session.completed', checkout('cs_live_disabledref', { metadata: { plan: 'monthly' }, client_reference_id: monthRow.id })));
+assert.ok(rowFor('cs_live_disabledref'));
+assert.equal(rowFor('cs_live_month').expires_at, renewed.expires_at, 'disabled pass untouched');

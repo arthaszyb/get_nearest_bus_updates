@@ -28,6 +28,19 @@ export function createD1() {
       };
       return api;
     },
+    // Like D1: the statements run in order, in one transaction.
+    async batch(statements) {
+      sqlite.exec('BEGIN');
+      try {
+        const results = [];
+        for (const statement of statements) results.push(await statement.run());
+        sqlite.exec('COMMIT');
+        return results;
+      } catch (err) {
+        sqlite.exec('ROLLBACK');
+        throw err;
+      }
+    },
   };
   return { DB, sqlite };
 }
