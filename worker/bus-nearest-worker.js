@@ -1,3 +1,5 @@
+import { MRT_STATIONS } from './mrt-stations.js';
+
 const STOPS_CACHE_KEY = 'bus_stops_cache';
 const STOPS_CACHE_TTL_SECONDS = 7 * 24 * 60 * 60; // bus stop coordinates rarely change
 
@@ -131,6 +133,17 @@ function dist(lat1, lon1, lat2, lon2) {
 
 // LTA lists services in string order (154, 180, 49, 98M...); sort them the way
 // people read them instead: 49, 98, 98M, 154, 180.
+// Where a service is heading and the next MRT stations it calls at on the way.
+function destinationOf(svc, stopCode, routes, stopsByCode) {
+  const destCode = [svc.NextBus, svc.NextBus2, svc.NextBus3].find((b) => b?.DestinationCode)?.DestinationCode;
+  if (!destCode || !stopsByCode) return { destination: null, nextStations: [] };
+  const destStop = stopsByCode.get(destCode);
+  return {
+    destination: { code: destCode, name: destStop?.Description ?? destCode },
+    nextStations: nextStations(svc.ServiceNo, stopCode, destCode, routes?.routes, stopsByCode),
+  };
+}
+
 function compareServiceNo(a, b) {
   const [, numA, suffixA] = a.match(/^(\d*)(.*)$/);
   const [, numB, suffixB] = b.match(/^(\d*)(.*)$/);
@@ -138,11 +151,13 @@ function compareServiceNo(a, b) {
 }
 
 // Turns one stop + its raw BusArrival response into the shape every output format renders from.
-function toStopModel(stop, arrival, now) {
+// `routes` and `stopsByCode` (code → stop) let it name destinations and the MRT stations ahead.
+function toStopModel(stop, arrival, now, { routes, stopsByCode } = {}) {
   const services = (arrival?.Services || [])
     .map((svc) => ({
       no: svc.ServiceNo,
-      buses: [svc.NextBus, svc.NextBus2, svc.NextBus3]
+      ...destinationOf(svc, stop.BusStopCode, routes, stopsByCode),
+      buses: [svc.NextBus, svc.NextBus2]
         .filter((b) => b?.EstimatedArrival)
         .map((b) => ({
           mins: Math.max(0, Math.round((new Date(b.EstimatedArrival) - now) / 60000)),
@@ -160,6 +175,131 @@ function toStopModel(stop, arrival, now) {
     distance: Math.round(stop.d),
     services,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Destinations and the MRT stations a bus calls at next
+// ---------------------------------------------------------------------------
+
+// Official line colours, by station-code prefix.
+const LINE_COLOURS = {
+  NS: '#d42e12', EW: '#009645', CG: '#009645', NE: '#9900aa', CC: '#fa9e0d', CE: '#fa9e0d',
+  DT: '#005ec4', TE: '#9d5b25', BP: '#748477', SW: '#748477', SE: '#748477', PW: '#748477', PE: '#748477', STC: '#748477',
+};
+// For plain text, where colour has to come from an emoji.
+const LINE_SQUARES = { NS: '🟥', EW: '🟩', CG: '🟩', NE: '🟪', CC: '🟧', CE: '🟧', DT: '🟦', TE: '🟫' };
+const linePrefix = (code) => code.replace(/\d+$/, '');
+
+// A bus stop counts as calling at a station when it's within 150 m of one of the station's exits,
+// or within 250 m when the stop is named after a station ("… Stn"). Checked against all 5,210
+// stops: catches 86% of "Stn" stops and stops like "Prudential Twr" by Raffles Place.
+const STATION_RADIUS_M = 150;
+const NAMED_STATION_RADIUS_M = 250;
+// Exits bucketed into ~330 m grid cells, so a lookup only checks the exits in the 3×3 cells around a stop.
+const GRID_DEG = 0.003;
+const cellKey = (lat, lon) => `${Math.floor(lat / GRID_DEG)},${Math.floor(lon / GRID_DEG)}`;
+const EXIT_GRID = new Map();
+for (const [name, codes, exits] of MRT_STATIONS) {
+  for (const [lat, lon] of exits) {
+    const key = cellKey(lat, lon);
+    if (!EXIT_GRID.has(key)) EXIT_GRID.set(key, []);
+    EXIT_GRID.get(key).push({ lat, lon, station: { name, codes } });
+  }
+}
+
+// The station a bus stop serves, or null.
+function stationAt(stop) {
+  if (!stop) return null;
+  const row = Math.floor(stop.Latitude / GRID_DEG);
+  const col = Math.floor(stop.Longitude / GRID_DEG);
+  let best = null;
+  for (let r = row - 1; r <= row + 1; r++) {
+    for (let c = col - 1; c <= col + 1; c++) {
+      for (const exit of EXIT_GRID.get(`${r},${c}`) || []) {
+        const m = dist(stop.Latitude, stop.Longitude, exit.lat, exit.lon);
+        if (!best || m < best.m) best = { m, station: exit.station };
+      }
+    }
+  }
+  const radius = /\bStn\b/.test(stop.Description) ? NAMED_STATION_RADIUS_M : STATION_RADIUS_M;
+  return best && best.m <= radius ? best.station : null;
+}
+
+// The next `count` distinct stations a service calls at after this stop, heading for `destCode`.
+// `routes` maps "service|direction" to its stop codes in order (see refreshRoutesStep).
+function nextStations(no, stopCode, destCode, routes, stopsByCode, count = 2) {
+  let sequence = null;
+  for (const direction of ['1', '2']) {
+    const codes = routes?.[`${no}|${direction}`]?.split(',');
+    if (!codes?.includes(stopCode)) continue;
+    sequence = codes;
+    if (codes.at(-1) === destCode) break; // the direction actually heading to this destination
+  }
+  if (!sequence) return [];
+
+  const here = stationAt(stopsByCode.get(stopCode))?.name;
+  const found = [];
+  for (const code of sequence.slice(sequence.indexOf(stopCode) + 1)) {
+    const station = stationAt(stopsByCode.get(code));
+    if (station && station.name !== here && !found.some((s) => s.name === station.name)) found.push(station);
+    if (found.length === count || code === destCode) break;
+  }
+  return found;
+}
+
+// Which stops each service calls at, in order, from LTA's BusRoutes (~26,000 rows, ~53 pages).
+// Too big to load during a request, so it's built in the background a few pages at a time — by
+// the cron trigger and by requests that find it missing — and swapped in once complete.
+const ROUTES_CACHE_KEY = 'bus_route_stops';
+const ROUTES_JOB_KEY = 'bus_route_stops_job';
+const ROUTES_LOCK_KEY = 'bus_route_stops_lock';
+const ROUTES_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+// Pages per background step. With retries this stays under the Workers free plan's 50 subrequests.
+const ROUTES_PAGES_PER_STEP = 12;
+// At most one background step a minute (KV's minimum expiry), to go easy on LTA.
+const ROUTES_LOCK_SECONDS = 60;
+
+// { updatedAt, routes: { "180|1": "28009,28011,…" } }, or null until it has been built.
+async function getRoutes(env) {
+  return env.BUS_STOPS_KV ? env.BUS_STOPS_KV.get(ROUTES_CACHE_KEY, 'json') : null;
+}
+
+// Advances the background build of the routes table by one step, if it's missing or stale and
+// no step ran in the last minute. Idempotent: if two ever overlap they only repeat work.
+async function refreshRoutesStep(env, now, current) {
+  const kv = env.BUS_STOPS_KV;
+  if (!kv || !env.LTA_API_KEY) return;
+  if (current === undefined) current = await getRoutes(env);
+  if (current && now - current.updatedAt < ROUTES_MAX_AGE_MS) return;
+  if (await kv.get(ROUTES_LOCK_KEY)) return;
+  await kv.put(ROUTES_LOCK_KEY, String(now), { expirationTtl: ROUTES_LOCK_SECONDS });
+
+  const job = (await kv.get(ROUTES_JOB_KEY, 'json')) || { nextSkip: 0, stops: {} };
+  const headers = { AccountKey: env.LTA_API_KEY, accept: 'application/json' };
+  const { records, nextSkip, done } = await fetchLtaPages('BusRoutes', headers, {
+    skip: job.nextSkip,
+    maxPages: ROUTES_PAGES_PER_STEP,
+  });
+  for (const { ServiceNo: no, Direction: direction, StopSequence: seq, BusStopCode: code } of records) {
+    (job.stops[`${no}|${direction}`] ||= []).push([seq, code]);
+  }
+
+  if (done) {
+    const routes = Object.fromEntries(
+      Object.entries(job.stops).map(([key, stops]) => [
+        key,
+        stops
+          .sort((a, b) => a[0] - b[0])
+          .map(([, code]) => code)
+          .join(','),
+      ])
+    );
+    await kv.put(ROUTES_CACHE_KEY, JSON.stringify({ updatedAt: now, routes }));
+    await kv.delete(ROUTES_JOB_KEY);
+  } else {
+    await kv.put(ROUTES_JOB_KEY, JSON.stringify({ nextSkip, stops: job.stops }));
+  }
+  // The lock is left to expire, so this runs at most once a minute however busy the Worker is.
 }
 
 // ---------------------------------------------------------------------------
@@ -621,7 +761,11 @@ function renderText(stops, warning, renewUrl) {
     for (const svc of stop.services) {
       const times = svc.buses.map((b) => `${LOAD_DOTS[b.load] || ''}${b.mins === 0 ? 'Now' : b.mins}`);
       const unit = svc.buses.at(-1)?.mins > 0 ? ' min' : '';
-      lines.push(`${svc.no}   ${times.join(' · ') || 'N/A'}${unit}`);
+      const via = svc.nextStations?.length
+        ? ` (${svc.nextStations.map((st) => `${LINE_SQUARES[linePrefix(st.codes[0])] || '⬜'}${st.name}`).join(', ')})`
+        : '';
+      const dest = svc.destination ? ` → ${svc.destination.name}${via}` : '';
+      lines.push(`${svc.no}   ${times.join(' · ') || 'N/A'}${unit}${dest}`);
     }
     lines.push('');
   }
@@ -683,7 +827,7 @@ ${refresh ? `<meta http-equiv="refresh" content="${refresh}">\n` : ''}<title>${e
   .stop h2 { font-size: 17px; margin: 0; }
   .stop p { margin: 2px 0 0; color: var(--muted); font-size: 13px; }
   .row {
-    display: grid; grid-template-columns: 64px repeat(3, 1fr); align-items: center;
+    display: grid; grid-template-columns: 54px 64px 62px minmax(0, 1fr); align-items: center; column-gap: 8px;
     padding: 9px 16px; border-top: 1px solid var(--line); font-variant-numeric: tabular-nums;
   }
   .row.empty { display: block; color: var(--muted); }
@@ -698,6 +842,11 @@ ${refresh ? `<meta http-equiv="refresh" content="${refresh}">\n` : ''}<title>${e
   .t.next b { font-size: 20px; font-weight: 700; }
   .t.now b { color: var(--accent); }
   .t.sched { opacity: 0.5; }
+  .dest { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 13px; line-height: 1.25; }
+  .dest b { font-weight: 600; overflow-wrap: anywhere; }
+  .dest.solo { font-size: 16px; font-weight: 600; }
+  .mrt { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+  .ln { font-style: normal; font-weight: 700; font-size: 10px; color: #fff; border-radius: 4px; padding: 1px 4px; flex: none; }
   .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--line); }
   .dot.seats { background: var(--seats); }
   .dot.standing { background: var(--standing); }
@@ -727,6 +876,21 @@ ${content}
 </html>`;
 }
 
+function renderDestination(svc) {
+  if (!svc.destination) return '<span class="dest"></span>';
+  const name = escapeHtml(svc.destination.name);
+  if (!svc.nextStations?.length) return `<span class="dest solo">${name}</span>`;
+  const stations = svc.nextStations
+    .map(
+      (st) =>
+        `<span class="mrt">${st.codes
+          .map((code) => `<i class="ln" style="background:${LINE_COLOURS[linePrefix(code)] || '#748477'}">${escapeHtml(code)}</i>`)
+          .join('')}${escapeHtml(st.name)}</span>`
+    )
+    .join('');
+  return `<span class="dest"><b>${name}</b>${stations}</span>`;
+}
+
 function renderStopCard(stop) {
   const rows = stop.services.length
     ? stop.services
@@ -734,8 +898,9 @@ function renderStopCard(stop) {
           (svc) =>
             `<div class="row"><span class="svc">${escapeHtml(svc.no)}</span>` +
             (svc.buses.length
-              ? [0, 1, 2].map((i) => renderBusCell(svc.buses[i], i === 0)).join('')
-              : '<span class="t next">N/A</span>') +
+              ? [0, 1].map((i) => renderBusCell(svc.buses[i], i === 0)).join('')
+              : '<span class="t next">N/A</span><span class="t"></span>') +
+            renderDestination(svc) +
             '</div>'
         )
         .join('')
@@ -924,7 +1089,8 @@ function siteFooter(env, now) {
   // The Singapore Open Data Licence asks for this notice wherever LTA data is used.
   return `<footer class="site-footer"><div class="wrap">
   <nav>${links.join('')}</nav>
-  Contains information from LTA DataMall accessed on ${formatDate(now)} from the Land Transport Authority, which is made
+  Contains information from LTA DataMall accessed on ${formatDate(now)} from the Land Transport Authority, and MRT/LRT
+  station data from LTA via data.gov.sg, which is made
   available under the terms of the <a href="https://data.gov.sg/open-data-licence">Singapore Open Data Licence version 1.0</a>.
   Not affiliated with LTA.
 </div></footer>`;
@@ -1003,23 +1169,32 @@ async function handleFreeSignup(request, env, now) {
 }
 
 // What the landing page's demo shows — a typical lunchtime at Lakeside.
-const SAMPLE_STOPS = [
-  {
-    code: '28091', name: 'Lakeside Stn', road: 'Boon Lay Way', distance: 90,
-    services: [
-      { no: '49', buses: [{ mins: 3, load: 'seats', live: true }, { mins: 12, load: 'seats', live: true }, { mins: 24, load: 'standing', live: false }] },
-      { no: '180', buses: [{ mins: 0, load: 'full', live: true }, { mins: 6, load: 'standing', live: true }, { mins: 14, load: 'seats', live: true }] },
-      { no: '240', buses: [{ mins: 5, load: 'seats', live: true }, { mins: 13, load: 'seats', live: true }, { mins: 22, load: 'seats', live: true }] },
-    ],
-  },
-  {
-    code: '28099', name: 'Opp Lakeside Stn', road: 'Boon Lay Way', distance: 186,
-    services: [
-      { no: '98', buses: [{ mins: 2, load: 'standing', live: true }, { mins: 9, load: 'seats', live: true }, { mins: 17, load: 'seats', live: true }] },
-      { no: '154', buses: [{ mins: 7, load: 'seats', live: true }, { mins: 15, load: 'seats', live: true }, { mins: 26, load: 'seats', live: false }] },
-    ],
-  },
-];
+const SAMPLE_STOPS = (() => {
+  const st = (name, codes) => ({ name, codes });
+  const svc = (no, buses, destination, nextStations = []) => ({
+    no,
+    buses: buses.map(([mins, load, live = true]) => ({ mins, load, live })),
+    destination: { name: destination },
+    nextStations,
+  });
+  return [
+    {
+      code: '28091', name: 'Lakeside Stn', road: 'Boon Lay Way', distance: 90,
+      services: [
+        svc('49', [[3, 'seats'], [12, 'seats']], 'Jurong East Int', [st('Chinese Garden', ['EW25']), st('Jurong East', ['NS1', 'EW24'])]),
+        svc('180', [[0, 'full'], [6, 'standing']], 'Boon Lay Int', [st('Boon Lay', ['EW27'])]),
+        svc('240', [[5, 'seats'], [13, 'seats']], 'Boon Lay Int'),
+      ],
+    },
+    {
+      code: '28099', name: 'Opp Lakeside Stn', road: 'Boon Lay Way', distance: 186,
+      services: [
+        svc('98', [[2, 'standing'], [9, 'seats']], 'Jurong East Int', [st('Jurong East', ['NS1', 'EW24'])]),
+        svc('154', [[7, 'seats'], [15, 'seats', false]], 'Boon Lay Int'),
+      ],
+    },
+  ];
+})();
 
 function renderLanding(env, now) {
   const promo = now <= PROMO_ENDS_AT;
@@ -1229,7 +1404,12 @@ function renderTerms(env, now) {
 }
 
 export default {
-  async fetch(request, env) {
+  // Cron trigger (wrangler.toml): keeps building / refreshing the routes table in the background.
+  async scheduled(controller, env, ctx) {
+    ctx.waitUntil(refreshRoutesStep(env, Date.now()));
+  },
+
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
     const now = Date.now();
 
@@ -1275,13 +1455,17 @@ export default {
       .sort((a, b) => a.d - b.d)
       .slice(0, NEAREST_STOPS);
 
+    const routesPromise = getRoutes(env);
     const arrivals = await Promise.all(
       nearest.map((s) =>
         fetchLta(`v3/BusArrival?BusStopCode=${s.BusStopCode}`, headers, (b) => Array.isArray(b.Services))
       )
     );
 
-    const stops = nearest.map((stop, i) => toStopModel(stop, arrivals[i], now));
+    const routes = await routesPromise;
+    ctx?.waitUntil(refreshRoutesStep(env, now, routes));
+    const stopsByCode = new Map(allStops.map((s) => [s.BusStopCode, s]));
+    const stops = nearest.map((stop, i) => toStopModel(stop, arrivals[i], now, { routes, stopsByCode }));
     const pass = access.pass;
     const warning = expiryWarning(pass, now);
 
