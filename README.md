@@ -382,7 +382,9 @@ query parameters. Instead the Worker writes one JSON line per request:
 
 `access` is `owner`, `token`, `device` (built-in free tier) or `denied` (with `reason`); `ref` is
 the token's id, never the token. Uncaught errors are logged with their stack and answered with a
-plain 500. Traces may still carry request URLs (with the location) — the privacy policy says so.
+plain 500. `redact_query_string` strips query strings (the location) from the URLs that traces
+record. The stop codes in the log line still say roughly where someone was; the privacy policy
+covers that.
 
 ## Known limitations / possible next steps
 
