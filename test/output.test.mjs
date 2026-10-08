@@ -46,8 +46,8 @@ assert.equal((await call(`lat=1&lon=2&token=nope`)).status, 401);
 assert.equal((await call(`token=secret`)).status, 400);
 
 const text = await (await call(base)).text();
-assert.match(text, /^🚏 Lakeside Stn · 28091 · 90m\n49   🟢8 · 🟢26 · 🟡38 min\n98   🟡10/);
-assert.match(text, /180   🔴Now · 🟡12 · 🟢14 min/);
+assert.match(text, /^🚏 Lakeside Stn · 28091 · 90m\n49   🟢8 · 🟢26 min\n98   🟡10/);
+assert.match(text, /180   🔴Now · 🟡12 min\n/);
 assert.match(text, /\n99   N\/A\n/, 'service listed by LTA without arrival times');
 assert.ok(!text.includes('28389') && !text.includes('Far Away'), 'only the nearest 3 stops');
 
