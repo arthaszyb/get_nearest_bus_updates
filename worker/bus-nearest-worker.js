@@ -1,3 +1,4 @@
+import { APP_ICON_180, APP_ICON_512 } from './app-icons.js';
 import { MRT_STATIONS } from './mrt-stations.js';
 
 const STOPS_CACHE_KEY = 'bus_stops_cache';
@@ -378,7 +379,7 @@ async function authorize(request, url, env, now) {
 
   const pass = await recordUse(env.DB, await sha256(token), now);
   if (!pass) {
-    return { error: { status: 401, message: 'Invalid access token. Check the token in your Shortcut.' } };
+    return { error: { status: 401, message: 'Invalid access token. Check the token you pasted.' } };
   }
   if (pass.status !== 'active') {
     return { error: { status: 403, message: 'This access token has been disabled.' } };
@@ -788,7 +789,7 @@ function renderBusCell(bus, isNext) {
   return `<span class="${cls}">${dot}${time}</span>`;
 }
 
-function htmlPage(content, { refresh, title = 'Nearby buses', bodyClass, css = '' } = {}) {
+function htmlPage(content, { refresh, title = 'Nearby buses', bodyClass, css = '', head = '' } = {}) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -796,7 +797,7 @@ function htmlPage(content, { refresh, title = 'Nearby buses', bodyClass, css = '
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <meta name="referrer" content="no-referrer">
-${refresh ? `<meta http-equiv="refresh" content="${refresh}">\n` : ''}<title>${escapeHtml(title)}</title>
+${refresh ? `<meta http-equiv="refresh" content="${refresh}">\n` : ''}${head ? `${head}\n` : ''}<title>${escapeHtml(title)}</title>
 <style>
   :root {
     --bg: #f2f2f7; --card: #fff; --text: #1c1c1e; --muted: #8e8e93; --line: #e5e5ea;
@@ -1277,7 +1278,7 @@ function renderLanding(env, now) {
       </div>
       ${paidCards}
     </div>
-    <p class="fine">Prices in SGD. Subscriptions renew automatically until cancelled. iPhone only for now — it runs as an Apple Shortcut.</p>
+    <p class="fine">Prices in SGD. Subscriptions renew automatically until cancelled. Runs as an Apple Shortcut on iPhone, or as a <a href="/app">Home Screen web app</a>.</p>
   </div>
 </section>`,
     `${PRODUCT_NAME} — live bus arrivals near you, in one tap`,
@@ -1313,6 +1314,9 @@ function renderInstall(env, now) {
     <li><b>Action button</b> (iPhone 15 Pro and later): Settings › Action Button › Shortcut › ${PRODUCT_NAME}.</li>
     <li><b>Siri:</b> say "Hey Siri, ${PRODUCT_NAME}".</li>
   </ul>
+
+  <h2>No Shortcuts? Use the web app</h2>
+  <p>Open <a href="/app">${PRODUCT_NAME} web app</a> in Safari, tap <b>Share</b> › <b>Add to Home Screen</b>, and allow location when asked. It opens full screen like an app. Subscribers tap <b>Token</b> in the app and paste their token.</p>
 
   <h2>Upgrading later</h2>
   <p>Pick a plan on the <a href="/#pricing">pricing page</a>. After paying, tap <b>Copy token &amp; open the Shortcut</b>, choose <b>Replace</b>, and paste the token when asked.</p>
@@ -1403,6 +1407,156 @@ function renderTerms(env, now) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Home Screen web app (/app): full screen, no browser bars. Uses the browser's location, keeps a
+// random device ID and the optional token in localStorage, and shows the same arrivals page by
+// fetching ?format=html and swapping in its cards.
+// ---------------------------------------------------------------------------
+
+const APP_CSS = `
+  body { padding-top: calc(16px + env(safe-area-inset-top)); min-height: 100vh; }
+  header { gap: 12px; }
+  header h1 { white-space: nowrap; }
+  header .tools { display: flex; gap: 14px; align-items: baseline; flex: none; }
+  header button { all: unset; color: var(--muted); font-size: 13px; cursor: pointer; }
+  #status { text-align: center; color: var(--muted); padding: 40px 16px; }
+  #content.loading { opacity: .55; transition: opacity .2s; }
+  .hint { padding: 12px 16px; font-size: 14px; line-height: 1.4; }
+  dialog { border: 0; border-radius: 16px; padding: 18px; width: min(92vw, 420px); background: var(--card); color: var(--text); }
+  dialog::backdrop { background: rgba(0, 0, 0, .4); }
+  dialog h2 { font-size: 19px; margin: 0 0 6px; }
+  dialog p { margin: 0 0 12px; font-size: 14px; color: var(--muted); line-height: 1.4; }
+  dialog input {
+    width: 100%; font: 16px ui-monospace, SFMono-Regular, Menlo, monospace; padding: 11px 12px; margin-bottom: 12px;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--text);
+  }
+  dialog .btns { display: grid; gap: 8px; }
+  dialog .btn.secondary { box-shadow: none; }
+`;
+
+const APP_SCRIPT = `
+(() => {
+  const store = {
+    get: (k) => { try { return localStorage.getItem(k) || ''; } catch { return ''; } },
+    set: (k, v) => { try { v ? localStorage.setItem(k, v) : localStorage.removeItem(k); } catch {} },
+  };
+  let device = store.get('busnearby.device');
+  if (!device) { device = 'app:' + crypto.randomUUID(); store.set('busnearby.device', device); }
+
+  const $ = (id) => document.getElementById(id);
+  const content = $('content'), status = $('status'), updated = $('updated');
+  const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+  if (!standalone) $('install').hidden = false;
+
+  let timer, lastLoad = 0, busy = false;
+  const say = (msg) => { status.textContent = msg; status.hidden = !msg; };
+
+  function locate() {
+    return new Promise((resolve, reject) =>
+      navigator.geolocation
+        ? navigator.geolocation.getCurrentPosition(resolve, reject, { enableHighAccuracy: true, timeout: 15000, maximumAge: 15000 })
+        : reject({ code: 0 })
+    );
+  }
+
+  async function load() {
+    if (busy) return;
+    busy = true; clearTimeout(timer);
+    content.classList.add('loading');
+    if (!content.childElementCount) say('Finding buses near you…');
+    try {
+      const pos = await locate();
+      const q = new URLSearchParams({ lat: pos.coords.latitude.toFixed(6), lon: pos.coords.longitude.toFixed(6), format: 'html', device });
+      const token = store.get('busnearby.token');
+      if (token) q.set('token', token);
+      const res = await fetch('/?' + q, { cache: 'no-store' });
+      const doc = new DOMParser().parseFromString(await res.text(), 'text/html');
+      doc.querySelector('header')?.remove();
+      content.replaceChildren(...doc.body.children);
+      say('');
+      lastLoad = Date.now();
+      updated.textContent = new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) + ' ↻';
+      // The server decides whether this pass auto-refreshes (paid passes do, the free one doesn't).
+      const refresh = parseInt(doc.querySelector('meta[http-equiv="refresh"]')?.content, 10);
+      if (refresh > 0) timer = setTimeout(() => document.hidden || load(), refresh * 1000);
+    } catch (err) {
+      say(err && err.code === 1
+        ? 'Location is off for ${PRODUCT_NAME}. Allow it in Settings › Privacy & Security › Location Services › Safari Websites, then tap ↻.'
+        : err && 'code' in err ? 'Couldn\\'t get your location. Tap ↻ to try again.' : 'Couldn\\'t reach ${PRODUCT_NAME}. Check your connection and tap ↻.');
+    } finally {
+      busy = false;
+      content.classList.remove('loading');
+    }
+  }
+
+  updated.onclick = load;
+  // Reopening the app should show fresh times, without spending a check on a quick app switch.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && Date.now() - lastLoad > 60000) load(); });
+
+  const dlg = $('settings'), input = $('token');
+  $('open-settings').onclick = () => { input.value = store.get('busnearby.token'); dlg.showModal(); };
+  $('save').onclick = () => { store.set('busnearby.token', input.value.trim()); dlg.close(); load(); };
+  $('clear').onclick = () => { store.set('busnearby.token', ''); dlg.close(); load(); };
+  $('cancel').onclick = () => dlg.close();
+
+  load();
+})();
+`;
+
+function renderApp() {
+  const head = `<link rel="manifest" href="/app.webmanifest">
+<link rel="apple-touch-icon" href="/app-icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="${PRODUCT_NAME}">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#f2f2f7" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">`;
+  return new Response(
+    htmlPage(
+      `<header><h1>Nearby buses</h1><div class="tools"><button id="updated" type="button">↻</button><button id="open-settings" type="button" aria-label="Settings">Token</button></div></header>
+<div id="install" class="card notice hint" hidden>Add ${PRODUCT_NAME} to your Home Screen for a full-screen app: tap <b>Share</b> › <b>Add to Home Screen</b>.</div>
+<p id="status">Finding buses near you…</p>
+<main id="content"></main>
+<dialog id="settings">
+  <h2>Access token</h2>
+  <p>Leave empty for the free plan (${ANONYMOUS_DAILY_LIMIT} checks a day). Subscribed? Paste the token from the page you saw after paying. <a href="/#pricing">See plans</a></p>
+  <input id="token" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste token">
+  <div class="btns"><button id="save" type="button">Save</button><button id="clear" class="btn secondary" type="button">Use free plan</button><button id="cancel" class="btn secondary" type="button">Cancel</button></div>
+</dialog>
+<script>${APP_SCRIPT}</script>`,
+      { title: PRODUCT_NAME, css: APP_CSS, head }
+    ),
+    { headers: HTML_HEADERS }
+  );
+}
+
+function appManifest() {
+  return Response.json(
+    {
+      id: '/app',
+      name: PRODUCT_NAME,
+      short_name: PRODUCT_NAME,
+      description: 'Live bus arrivals at the stops nearest you, in Singapore.',
+      start_url: '/app',
+      scope: '/app',
+      display: 'standalone',
+      background_color: '#f2f2f7',
+      theme_color: '#f2f2f7',
+      icons: [
+        { src: '/app-icon-180.png', sizes: '180x180', type: 'image/png' },
+        { src: '/app-icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+      ],
+    },
+    { headers: { 'content-type': 'application/manifest+json', 'cache-control': 'public, max-age=86400' } }
+  );
+}
+
+const appIcon = (b64) =>
+  new Response(Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)), {
+    headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=604800' },
+  });
+
 export default {
   // Cron trigger (wrangler.toml): keeps building / refreshing the routes table in the background.
   async scheduled(controller, env, ctx) {
@@ -1424,6 +1578,10 @@ export default {
       if (url.pathname === '/privacy') return renderPrivacy(env, now);
       if (url.pathname === '/terms') return renderTerms(env, now);
       if (url.pathname === '/install') return renderInstall(env, now);
+      if (url.pathname === '/app') return renderApp();
+      if (url.pathname === '/app.webmanifest') return appManifest();
+      if (url.pathname === '/app-icon-180.png') return appIcon(APP_ICON_180);
+      if (url.pathname === '/app-icon-512.png') return appIcon(APP_ICON_512);
     }
 
     const format = url.searchParams.get('format');

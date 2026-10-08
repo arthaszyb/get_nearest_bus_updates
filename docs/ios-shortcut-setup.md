@@ -29,7 +29,9 @@ Create a new Shortcut, name it **BusNearby**, and add these actions in this orde
 | 8 | **URL Encode** | Mode: **Encode**, input: the Text from action 7 |
 | 9 | **Get Current Location** | — |
 | 10 | **URL** | `WORKER/?lat=` **Current Location › Latitude** `&lon=` **Current Location › Longitude** `&format=html&token=` **Text (action 1)** `&device=` **URL Encoded Text (action 8)** |
-| 11 | **Show Web Page** | Input: the URL from action 10 |
+| 11 | **Get Contents of URL** | Input: the URL from action 10 |
+| 12 | **Set Name** | Input: **Contents of URL**, name: `BusNearby.html` |
+| 13 | **Quick Look** | Input: **Renamed Item** |
 
 How to insert a variable: put the cursor where it goes, tap the variable bar above the keyboard,
 and pick the action's output. For Latitude and Longitude, insert **Current Location**, tap the
@@ -42,8 +44,12 @@ Why each piece is there:
 - **Actions 2–8 (device)** — iOS gives Shortcuts no stable device ID, so the free plan's daily
   count is keyed on a one-way hash of these details. Only the hash is stored. URL-encoding keeps
   names with spaces, apostrophes or non-Latin characters intact.
-- **`format=html` + Show Web Page** — the styled page with stop cards and crowding colours.
-  (Drop `&format=html` and use **Get Contents of URL** → **Show Result** for plain text instead.)
+- **`format=html` + Quick Look (actions 11–13)** — the styled page with stop cards and crowding
+  colours, shown as a full-screen sheet with no address bar or browser toolbar. Naming the result
+  `.html` is what makes Quick Look render it as a page. Quick Look doesn't reload the page, so to
+  refresh, close it and run the Shortcut again. (**Show Web Page** also works and auto-refreshes,
+  but shows Safari's address bar and toolbar. For plain text, drop `&format=html` and use
+  **Show Result** instead of actions 12–13.)
 
 Tap ▶︎ to test. Allow location and the connection to the Worker when asked. You should see the
 nearest 3 stops; a fifth run in one day should say you've used today's 4 free checks.
